@@ -3,7 +3,7 @@
   "display_name": "Chase",
   "agent_class": "ChaseBotPacked",
   "agent_file": "ChaseBotPacked.java",
-  "model_provider": "openai",
-  "model_name": "gpt-5",
-  "description": "Hybrid LLM-guided bot: adaptive macro-strategy engine with GPT-5 strategic consultation for attack/defense bias, military/economy balance, and unit composition. Rule-based execution with LLM-tuned parameters every 200 ticks."
+  "model_provider": "ollama",
+  "model_name": "llama3.1:8b",
+  "description": "Hybrid LLM-guided bot: adaptive macro-strategy engine with Ollama strategic consultation for attack or defense bias, economy balance, and unit composition, with llama3.1:8b as the default model."
 }
