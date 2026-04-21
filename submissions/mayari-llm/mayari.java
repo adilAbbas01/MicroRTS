@@ -5,6 +5,7 @@
  */
 // package mayariBot;
 package ai.abstraction.submissions.mayari_llm;
+import ai.abstraction.WorkerRushPlusPlus;
 
 import com.google.gson.JsonObject;
 
@@ -74,6 +75,7 @@ public class mayari extends AIWithComputationBudget {
     UnitTypeTable _utt = null;
     
     AStarPathFinding _astarPath;
+    WorkerRushPlusPlus _wrpp;
     
     int NoDirection = 100; //this is a hack
     long _startCycleMilli;
@@ -214,6 +216,7 @@ public class mayari extends AIWithComputationBudget {
         _utt = utt;
         restartPathFind(); //FloodFillPathFinding(); //AStarPathFinding();
         _memHarvesters = new ArrayList<>();
+        _wrpp = new WorkerRushPlusPlus(utt);
                 
         _dirs = new ArrayList<>();
         _dirs.add(UnitAction.DIRECTION_UP);
@@ -1276,28 +1279,34 @@ public class mayari extends AIWithComputationBudget {
     }
     
     private String buildGameStatePrompt() {
-        // Summarize the current game state using Mayari's populated lists
         StringBuilder sb = new StringBuilder();
         sb.append("You are an RTS AI commander. Respond ONLY with a JSON object containing a 'strategy' key.\n");
         sb.append("Current Game State:\n");
         sb.append("- Time (cycles): ").append(_gs.getTime()).append("\n");
+        sb.append("- Map Size: ").append(_pgs.getWidth()).append("x").append(_pgs.getHeight()).append("\n");
         sb.append("- Resources: ").append(_p.getResources()).append("\n");
         sb.append("- My Bases: ").append(_bases.size()).append("\n");
         sb.append("- My Barracks: ").append(_barracks.size()).append("\n");
         sb.append("- My Workers: ").append(_workers.size()).append("\n");
         sb.append("- My Heavies: ").append(_heavies.size()).append("\n");
         sb.append("- My Ranged: ").append(_archers.size()).append("\n");
+        sb.append("- My Lights: ").append(_lights.size()).append("\n");
         sb.append("- Enemy Bases: ").append(_enemyBases.size()).append("\n");
         sb.append("- Enemy Workers: ").append(_enemyWorkers.size()).append("\n");
         sb.append("- Enemy Heavies: ").append(_enemyHeavies.size()).append("\n");
+        sb.append("- Enemy Ranged: ").append(_enemyArchers.size()).append("\n");
+        sb.append("- Enemy Lights: ").append(_enemyLights.size()).append("\n");
         
         sb.append("\nChoose ONE of the following strategies: \n");
-        sb.append("1. BUILD_ECONOMY (Focus on workers and bases)\n");
-        sb.append("2. RUSH_HEAVY (Focus on building and attacking with Heavies)\n");
-        sb.append("3. WORKER_SWARM (Attack immediately with all workers)\n");
+        sb.append("1. BUILD_ECONOMY (Maximize resource collection early. Train many workers. Build military late but with superior resources. GOOD FOR SLOW GAMES ON LARGE MAPS)\n");
+        sb.append("2. RUSH_HEAVY (Focus on building and attacking with Heavies. Counters LIGHT units)\n");
+        sb.append("3. RUSH_LIGHT (Focus on building and attacking with Light units. Counters RANGED units)\n");
+        sb.append("4. RUSH_RANGED (Focus on building and attacking with Ranged units. Counters HEAVY units)\n");
+        sb.append("5. WORKER_SWARM (Attack immediately with all workers)\n");
+        sb.append("6. TURTLE (Defend your base, build barracks, train heavy units. Only attack when enemies are near base. GOOD WHEN LOSING OR UNDER ATTACK)\n");
         sb.append("\nOutput format: {\"strategy\": \"<CHOICE>\"}");
         
-        return sb.toString().replace("\"", "\\\"").replace("\n", "\\n");
+        return sb.toString();
     }
 
     private void askOllamaForStrategy() {
@@ -1305,7 +1314,6 @@ public class mayari extends AIWithComputationBudget {
         isLlmThinking = true;
         
         String prompt = buildGameStatePrompt();
-        // String jsonPayload = String.format("{\"model\": \"%s\", \"prompt\": \"%s\", \"stream\": false}", MODEL, prompt);
         JsonObject json = new JsonObject();
         json.addProperty("model", MODEL);
         json.addProperty("prompt", prompt);
@@ -1325,8 +1333,14 @@ public class mayari extends AIWithComputationBudget {
                         currentMacroStrategy = "BUILD_ECONOMY";
                     } else if (responseBody.contains("RUSH_HEAVY")) {
                         currentMacroStrategy = "RUSH_HEAVY";
+                    } else if (responseBody.contains("RUSH_LIGHT")) {
+                        currentMacroStrategy = "RUSH_LIGHT";
+                    } else if (responseBody.contains("RUSH_RANGED")) {
+                        currentMacroStrategy = "RUSH_RANGED";
                     } else if (responseBody.contains("WORKER_SWARM")) {
                         currentMacroStrategy = "WORKER_SWARM";
+                    } else if (responseBody.contains("TURTLE")) {
+                        currentMacroStrategy = "TURTLE";
                     }
                     System.out.println("LLM decided: " + currentMacroStrategy);
                 })
@@ -1336,7 +1350,7 @@ public class mayari extends AIWithComputationBudget {
                 })
                 .thenRun(() -> {
                     isLlmThinking = false;
-                    llmCooldown = 400; 
+                    llmCooldown = 200; // <--- Changed from 400 to 200 here!
                 });
     }
     // -------------------------------------
@@ -1345,6 +1359,10 @@ public class mayari extends AIWithComputationBudget {
     public PlayerAction getAction(int player, GameState gs) throws Exception {
         _gs = gs;
         _pgs = gs.getPhysicalGameState();
+
+        // --- 8x8 MAP BYPASS ---
+        if (_pgs.getWidth() <= 8) return _wrpp.getAction(player, gs);
+
          _p = gs.getPlayer(player);
         _enemyP = gs.getPlayer(player == 0 ? 1 : 0);
         
@@ -1366,12 +1384,46 @@ public class mayari extends AIWithComputationBudget {
             for (Unit barrack : _barracks) {
                 if (!busy(barrack)) produceCombat(barrack, _utt.getUnitType("Heavy"));
             }
-            workerAction();
-            goCombat(_heavies, 30);
+            if (baseUnderAttack) goCombat(_workers, 35); else { workerAction(); freeBlocks(_workers); }
+            goCombat(_heavies, 30); goCombat(_archers, 15); goCombat(_lights, 5);
         } 
+        else if (currentMacroStrategy.equals("RUSH_LIGHT")) {
+            buildBracks(); 
+            for (Unit barrack : _barracks) {
+                if (!busy(barrack)) produceCombat(barrack, _utt.getUnitType("Light"));
+            }
+            if (baseUnderAttack) goCombat(_workers, 35); else { workerAction(); freeBlocks(_workers); }
+            goCombat(_lights, 30); goCombat(_heavies, 30); goCombat(_archers, 15); 
+        }
+        else if (currentMacroStrategy.equals("RUSH_RANGED")) {
+            buildBracks(); 
+            for (Unit barrack : _barracks) {
+                if (!busy(barrack)) produceCombat(barrack, _utt.getUnitType("Ranged"));
+            }
+            if (baseUnderAttack) goCombat(_workers, 35); else { workerAction(); freeBlocks(_workers); }
+            goCombat(_archers, 30); goCombat(_heavies, 15); goCombat(_lights, 5); 
+        }
         else if (currentMacroStrategy.equals("WORKER_SWARM")) {
             goCombat(_workers, 35);
         } 
+        else if (currentMacroStrategy.equals("TURTLE")) {
+            buildBracks();
+            buildBase();
+            barracksAction(); // Build whatever is needed
+            basesAction();
+            
+            if (baseUnderAttack) {
+                // If enemy is close, everything fights
+                goCombat(_workers, 35);
+                goCombat(_heavies, 30);
+                goCombat(_archers, 15);
+                goCombat(_lights, 5);
+            } else {
+                // If safe, keep military idle near base and economy running
+                workerAction();
+                freeBlocks(_workers);
+            }
+        }
         else {
             buildBracks();
             buildBase();
