@@ -189,6 +189,7 @@ public class FortressBotAgent extends AbstractionLayerAI {
     private int lastConsultTick = Integer.MIN_VALUE / 4;
     private int modeLockedUntilTick = 0;
     private int lastWaveTick = Integer.MIN_VALUE / 4;
+    private AI boomRush64x64Delegate;
     private AI workerRushMirror;
     private AI heavyRushMirror;
     private boolean workerRushMirrorLatched;
@@ -206,6 +207,9 @@ public class FortressBotAgent extends AbstractionLayerAI {
         modeLockedUntilTick = 0;
         lastWaveTick = Integer.MIN_VALUE / 4;
         workerRushMirrorLatched = false;
+        if (boomRush64x64Delegate != null) {
+            boomRush64x64Delegate.reset();
+        }
         if (workerRushMirror != null) {
             workerRushMirror.reset();
         }
@@ -223,6 +227,7 @@ public class FortressBotAgent extends AbstractionLayerAI {
             lightType = utt.getUnitType("Light");
             rangedType = utt.getUnitType("Ranged");
             heavyType = utt.getUnitType("Heavy");
+            boomRush64x64Delegate = new FortressBoomRush64x64Delegate(utt);
             workerRushMirror = new WorkerRushPlusPlus(utt, new AStarPathFinding());
             heavyRushMirror = new HeavyRush(utt, new AStarPathFinding());
         }
@@ -237,6 +242,9 @@ public class FortressBotAgent extends AbstractionLayerAI {
         clone.modeLockedUntilTick = modeLockedUntilTick;
         clone.lastWaveTick = lastWaveTick;
         clone.workerRushMirrorLatched = workerRushMirrorLatched;
+        if (boomRush64x64Delegate != null) {
+            clone.boomRush64x64Delegate = boomRush64x64Delegate.clone();
+        }
         if (workerRushMirror != null) {
             clone.workerRushMirror = workerRushMirror.clone();
         }
@@ -250,6 +258,15 @@ public class FortressBotAgent extends AbstractionLayerAI {
     public PlayerAction getAction(int player, GameState gs) throws Exception {
         if (!gs.canExecuteAnyAction(player)) {
             return new PlayerAction();
+        }
+
+        PhysicalGameState pgs = gs.getPhysicalGameState();
+        if (isExact64x64(pgs) && boomRush64x64Delegate != null) {
+            try {
+                return boomRush64x64Delegate.getAction(player, gs);
+            } catch (Throwable e) {
+                debug("T=%d 64x64 boomrush delegate failed: %s", gs.getTime(), e.getMessage());
+            }
         }
 
         StateSnapshot snapshot = inspectState(player, gs);
@@ -2084,6 +2101,10 @@ public class FortressBotAgent extends AbstractionLayerAI {
 
     private boolean isSmallMap(StateSnapshot snapshot) {
         return snapshot != null && snapshot.mapWidth * snapshot.mapHeight <= SMALL_MAP_AREA;
+    }
+
+    private boolean isExact64x64(PhysicalGameState pgs) {
+        return pgs != null && pgs.getWidth() == 64 && pgs.getHeight() == 64;
     }
 
     private boolean isLargeMap(StateSnapshot snapshot) {
