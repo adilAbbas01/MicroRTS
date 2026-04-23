@@ -1377,7 +1377,17 @@ public class mayari extends AIWithComputationBudget {
         }
 
         // --- MICRO EXECUTION BASED ON MACRO STRATEGY ---
-        attackNearby(); 
+        attackNearby();
+
+        // Threat detection: is an enemy within 6 tiles of any base?
+        boolean baseUnderAttack = false;
+        for (Unit base : _bases) {
+            Unit closestEnemy = closest(base, _enemies);
+            if (closestEnemy != null && distance(toPos(base), toPos(closestEnemy)) <= 6) {
+                baseUnderAttack = true;
+                break;
+            }
+        }
 
         if (currentMacroStrategy.equals("RUSH_HEAVY")) {
             buildBracks(); 
@@ -1429,17 +1439,6 @@ public class mayari extends AIWithComputationBudget {
             buildBase();
             barracksAction();
             basesAction();
-            
-            // NEW --- THREAT DETECTION REFLEX ---
-            boolean baseUnderAttack = false;
-            for (Unit base : _bases) {
-                Unit closestEnemy = closest(base, _enemies);
-                // If an enemy is within 6 tiles of our base, POUND the alarm!
-                if (closestEnemy != null && distance(toPos(base), toPos(closestEnemy)) <= 6) {
-                    baseUnderAttack = true;
-                    break;
-                }
-            }
             
             // This should hopefully be able to beat WorkerRush
             if (baseUnderAttack || shouldWorkersAttack()) {
