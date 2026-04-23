@@ -169,6 +169,39 @@ public class MCTSAgent extends NaiveMCTS {
         }
     }
 
+    /**
+     * Mutable state for opening-book action construction.
+     */
+    private static final class OpeningContext {
+        final Snapshot snapshot;
+        final int player;
+        final GameState gs;
+        final List<Unit> myBases;
+        final List<Unit> myBarracks;
+        final List<Unit> myWorkers;
+        final Map<Long, Pair<Unit, UnitAction>> defenseMap;
+        final PlayerAction out;
+        final Set<Long> assigned = new HashSet<>();
+        int workerCount;
+        int rangedCount;
+        int heavyCount;
+
+        OpeningContext(Snapshot snapshot, Map<Long, Pair<Unit, UnitAction>> defenseMap) {
+            this.snapshot = snapshot;
+            this.player = snapshot.player;
+            this.gs = snapshot.gs;
+            this.myBases = snapshot.myBases;
+            this.myBarracks = snapshot.myBarracksUnits;
+            this.myWorkers = snapshot.myWorkersUnits;
+            this.workerCount = snapshot.myWorkers;
+            this.rangedCount = snapshot.myRanged;
+            this.heavyCount = snapshot.myHeavy;
+            this.defenseMap = defenseMap;
+            this.out = new PlayerAction();
+            this.out.setResourceUsage(new ResourceUsage());
+        }
+    }
+
     public MCTSAgent(UnitTypeTable utt) {
         super(120, -1, 105, 10,
               0.30f, 0.0f, 0.40f,
@@ -311,127 +344,119 @@ public class MCTSAgent extends NaiveMCTS {
      * <p>- borrow WorkerDefense for unassigned units while preventing production conflicts
      */
     private PlayerAction openingAction(Snapshot snapshot) throws Exception {
-        int player = snapshot.player;
-        GameState gs = snapshot.gs;
         currentStance = Stance.DEFEND;
         applyStanceBiases();
 
-        List<Unit> myBases = snapshot.myBases;
-        List<Unit> myBarracks = snapshot.myBarracksUnits;
-        List<Unit> myWorkers = snapshot.myWorkersUnits;
-        int workerCount = snapshot.myWorkers;
-        int rangedCount = snapshot.myRanged;
-        int heavyCount = snapshot.myHeavy;
-
-        PlayerAction defenseAction = workerDefensePolicy.getAction(player, gs);
-        Map<Long, Pair<Unit, UnitAction>> defenseMap = toActionMap(defenseAction);
-        PlayerAction out = new PlayerAction();
-        out.setResourceUsage(new ResourceUsage());
-        Set<Long> assigned = new HashSet<>();
-
-        boolean prioritizeWorkers = workerCount < openingWorkersBeforeBarracks(gs);
-        if (prioritizeWorkers) {
-            for (Unit base : myBases) {
-                if (gs.getActionAssignment(base) != null || assigned.contains(base.getID())) continue;
-                if (!canAffordUnitTypeNow(player, workerType, out, gs)) break;
-                UnitAction trainWorker = findProduceAction(base, workerType, gs);
-                if (addIfConsistent(out, base, trainWorker, gs)) {
-                    assigned.add(base.getID());
-                    workerCount++;
-                    break;
-                }
-            }
-        }
-
-        boolean barracksReady = !myBarracks.isEmpty();
-        boolean barracksInProgress = hasBarracksInProgress(player, gs);
-        boolean baseIsProducing = hasBaseProduceInProgress(player, gs);
-        if (!barracksReady && !barracksInProgress && !baseIsProducing) {
-            Unit bestWorker = null;
-            UnitAction bestBuild = null;
-            int bestDist = Integer.MAX_VALUE;
-            for (Unit worker : myWorkers) {
-                if (gs.getActionAssignment(worker) != null || assigned.contains(worker.getID())) continue;
-                if (!canAffordUnitTypeNow(player, barracksType, out, gs)) break;
-                UnitAction buildBarracks = findProduceAction(worker, barracksType, gs);
-                if (buildBarracks == null) continue;
-                int d = distanceToClosest(worker, myBases);
-                if (d < bestDist) {
-                    bestDist = d;
-                    bestWorker = worker;
-                    bestBuild = buildBarracks;
-                }
-            }
-            if (bestWorker != null && addIfConsistent(out, bestWorker, bestBuild, gs)) {
-                assigned.add(bestWorker.getID());
-            }
-        }
-
-        if (workerCount < openingWorkerTarget(gs)) {
-            for (Unit base : myBases) {
-                if (gs.getActionAssignment(base) != null || assigned.contains(base.getID())) continue;
-                if (!canAffordUnitTypeNow(player, workerType, out, gs)) break;
-                UnitAction trainWorker = findProduceAction(base, workerType, gs);
-                if (addIfConsistent(out, base, trainWorker, gs)) {
-                    assigned.add(base.getID());
-                    workerCount++;
-                    break;
-                }
-            }
-        }
-
-        if (barracksReady) {
-            for (Unit barracks : myBarracks) {
-                if (gs.getActionAssignment(barracks) != null || assigned.contains(barracks.getID())) continue;
-                if (rangedCount < openingRangedTarget(gs)) {
-                    if (!canAffordUnitTypeNow(player, rangedType, out, gs)) continue;
-                    UnitAction trainRanged = findProduceAction(barracks, rangedType, gs);
-                    if (addIfConsistent(out, barracks, trainRanged, gs)) {
-                        assigned.add(barracks.getID());
-                        rangedCount++;
-                    }
-                } else if (heavyCount < openingHeavyTarget(gs)) {
-                    if (!canAffordUnitTypeNow(player, heavyType, out, gs)) continue;
-                    UnitAction trainHeavy = findProduceAction(barracks, heavyType, gs);
-                    if (addIfConsistent(out, barracks, trainHeavy, gs)) {
-                        assigned.add(barracks.getID());
-                        heavyCount++;
-                    }
-                } else {
-                    boolean preferRangedNow = rangedCount <= heavyCount;
-                    UnitAction preferred = findProduceAction(barracks, preferRangedNow ? rangedType : heavyType, gs);
-                    UnitAction alternate = findProduceAction(barracks, preferRangedNow ? heavyType : rangedType, gs);
-                    UnitAction chosen = preferred != null ? preferred : alternate;
-                    UnitType chosenType = preferRangedNow ? rangedType : heavyType;
-                    if (preferred == null && alternate != null) {
-                        chosenType = preferRangedNow ? heavyType : rangedType;
-                    }
-                    if (!canAffordUnitTypeNow(player, chosenType, out, gs)) continue;
-                    if (addIfConsistent(out, barracks, chosen, gs)) {
-                        assigned.add(barracks.getID());
-                        if (chosen != null && chosen.getUnitType() == rangedType) rangedCount++;
-                        if (chosen != null && chosen.getUnitType() == heavyType) heavyCount++;
-                    }
-                }
-            }
-        }
-
-        for (Unit u : gs.getPhysicalGameState().getUnits()) {
-            if (u.getPlayer() != player) continue;
-            if (gs.getActionAssignment(u) != null || assigned.contains(u.getID())) continue;
-            Pair<Unit, UnitAction> fromDefense = defenseMap.get(u.getID());
-            if (fromDefense != null
-                    && fromDefense.m_b != null
-                    && fromDefense.m_b.getType() == UnitAction.TYPE_PRODUCE) {
-                continue;
-            }
-            if (fromDefense != null && addIfConsistent(out, fromDefense.m_a, fromDefense.m_b, gs)) {
-                assigned.add(u.getID());
-            }
-        }
+        OpeningContext ctx = createOpeningContext(snapshot);
+        trainWorkerFromBaseIfNeeded(ctx, openingWorkersBeforeBarracks(ctx.gs));
+        tryBuildFirstBarracks(ctx);
+        trainWorkerFromBaseIfNeeded(ctx, openingWorkerTarget(ctx.gs));
+        trainOpeningCombatUnits(ctx);
+        mergeDefenseFallbackActions(ctx);
 
         if (openingGoalsMet(snapshot)) openingComplete = true;
-        return out;
+        return ctx.out;
+    }
+
+    private OpeningContext createOpeningContext(Snapshot snapshot) throws Exception {
+        PlayerAction defenseAction = workerDefensePolicy.getAction(snapshot.player, snapshot.gs);
+        return new OpeningContext(snapshot, toActionMap(defenseAction));
+    }
+
+    private boolean isAssignedOrBusy(Unit unit, OpeningContext ctx) {
+        return unit == null
+                || ctx.gs.getActionAssignment(unit) != null
+                || ctx.assigned.contains(unit.getID());
+    }
+
+    private void trainWorkerFromBaseIfNeeded(OpeningContext ctx, int targetCount) {
+        if (ctx.workerCount >= targetCount) return;
+        for (Unit base : ctx.myBases) {
+            if (isAssignedOrBusy(base, ctx)) continue;
+            if (!canAffordUnitTypeNow(ctx.player, workerType, ctx.out, ctx.gs)) break;
+            UnitAction trainWorker = findProduceAction(base, workerType, ctx.gs);
+            if (addIfConsistent(ctx.out, base, trainWorker, ctx.gs)) {
+                ctx.assigned.add(base.getID());
+                ctx.workerCount++;
+                break;
+            }
+        }
+    }
+
+    private void tryBuildFirstBarracks(OpeningContext ctx) {
+        boolean barracksReady = !ctx.myBarracks.isEmpty();
+        boolean barracksInProgress = hasBarracksInProgress(ctx.player, ctx.gs);
+        boolean baseIsProducing = hasBaseProduceInProgress(ctx.player, ctx.gs);
+        if (barracksReady || barracksInProgress || baseIsProducing) return;
+
+        Unit bestWorker = null;
+        UnitAction bestBuild = null;
+        int bestDist = Integer.MAX_VALUE;
+        for (Unit worker : ctx.myWorkers) {
+            if (isAssignedOrBusy(worker, ctx)) continue;
+            if (!canAffordUnitTypeNow(ctx.player, barracksType, ctx.out, ctx.gs)) break;
+            UnitAction buildBarracks = findProduceAction(worker, barracksType, ctx.gs);
+            if (buildBarracks == null) continue;
+            int d = distanceToClosest(worker, ctx.myBases);
+            if (d < bestDist) {
+                bestDist = d;
+                bestWorker = worker;
+                bestBuild = buildBarracks;
+            }
+        }
+        if (bestWorker != null && addIfConsistent(ctx.out, bestWorker, bestBuild, ctx.gs)) {
+            ctx.assigned.add(bestWorker.getID());
+        }
+    }
+
+    private void trainOpeningCombatUnits(OpeningContext ctx) {
+        if (ctx.myBarracks.isEmpty()) return;
+        for (Unit barracks : ctx.myBarracks) {
+            if (isAssignedOrBusy(barracks, ctx)) continue;
+            if (ctx.rangedCount < openingRangedTarget(ctx.gs)) {
+                if (tryTrainFromBarracks(ctx, barracks, rangedType)) ctx.rangedCount++;
+                continue;
+            }
+            if (ctx.heavyCount < openingHeavyTarget(ctx.gs)) {
+                if (tryTrainFromBarracks(ctx, barracks, heavyType)) ctx.heavyCount++;
+                continue;
+            }
+
+            boolean preferRangedNow = ctx.rangedCount <= ctx.heavyCount;
+            UnitType preferredType = preferRangedNow ? rangedType : heavyType;
+            UnitType alternateType = preferRangedNow ? heavyType : rangedType;
+            UnitAction preferred = findProduceAction(barracks, preferredType, ctx.gs);
+            UnitAction alternate = findProduceAction(barracks, alternateType, ctx.gs);
+            UnitAction chosen = preferred != null ? preferred : alternate;
+            UnitType chosenType = preferred != null ? preferredType : alternateType;
+            if (chosen == null) continue;
+            if (!canAffordUnitTypeNow(ctx.player, chosenType, ctx.out, ctx.gs)) continue;
+            if (addIfConsistent(ctx.out, barracks, chosen, ctx.gs)) {
+                ctx.assigned.add(barracks.getID());
+                if (chosen.getUnitType() == rangedType) ctx.rangedCount++;
+                if (chosen.getUnitType() == heavyType) ctx.heavyCount++;
+            }
+        }
+    }
+
+    private boolean tryTrainFromBarracks(OpeningContext ctx, Unit barracks, UnitType type) {
+        if (!canAffordUnitTypeNow(ctx.player, type, ctx.out, ctx.gs)) return false;
+        UnitAction train = findProduceAction(barracks, type, ctx.gs);
+        if (!addIfConsistent(ctx.out, barracks, train, ctx.gs)) return false;
+        ctx.assigned.add(barracks.getID());
+        return true;
+    }
+
+    private void mergeDefenseFallbackActions(OpeningContext ctx) {
+        for (Unit unit : ctx.gs.getPhysicalGameState().getUnits()) {
+            if (unit.getPlayer() != ctx.player || isAssignedOrBusy(unit, ctx)) continue;
+            Pair<Unit, UnitAction> fromDefense = ctx.defenseMap.get(unit.getID());
+            if (fromDefense == null || fromDefense.m_b == null) continue;
+            if (fromDefense.m_b.getType() == UnitAction.TYPE_PRODUCE) continue;
+            if (addIfConsistent(ctx.out, fromDefense.m_a, fromDefense.m_b, ctx.gs)) {
+                ctx.assigned.add(unit.getID());
+            }
+        }
     }
 
     /**
@@ -669,12 +694,24 @@ public class MCTSAgent extends NaiveMCTS {
         String suggested = largeMap
                 ? "RANGED"
                 : (snapshot.enemyRanged > snapshot.enemyHeavy ? "HEAVY" : "RANGED");
-        String example = "{\"switch_required\":false,\"target_stance\":\"" + currentStance.name()
-                + "\",\"necessity\":\"NOT_NECESSARY\",\"preferred_unit\":\"" + suggested
-                + "\",\"ranged_attack_heavy_defense\":" + (largeMap ? "true" : "false")
-                + ",\"reason\":\"hold stance and do not split behavior\"}";
+        String example = buildPromptExample(suggested, largeMap);
 
         StringBuilder sb = new StringBuilder();
+        appendPromptRules(sb);
+        appendPromptState(sb, snapshot, underAttack, myPressure, enemyPressure);
+        appendPromptSchema(sb);
+        sb.append("Example: ").append(example);
+        return sb.toString();
+    }
+
+    private String buildPromptExample(String suggestedUnit, boolean largeMap) {
+        return "{\"switch_required\":false,\"target_stance\":\"" + currentStance.name()
+                + "\",\"necessity\":\"NOT_NECESSARY\",\"preferred_unit\":\"" + suggestedUnit
+                + "\",\"ranged_attack_heavy_defense\":" + (largeMap ? "true" : "false")
+                + ",\"reason\":\"hold stance and do not split behavior\"}";
+    }
+
+    private void appendPromptRules(StringBuilder sb) {
         sb.append("You are a strict stance controller for an RTS bot. Return JSON only.\n");
         sb.append("The bot has binary stances only: DEFEND or ATTACK.\n");
         sb.append("Do not suggest mixed behavior except when ranged_attack_heavy_defense=true.\n");
@@ -683,6 +720,10 @@ public class MCTSAgent extends NaiveMCTS {
         sb.append("Only pick preferred_unit=HEAVY on larger maps when enemy ranged pressure clearly demands it.\n");
         sb.append("On larger maps, prefer ranged_attack_heavy_defense=true: send ranged units forward to attack while keeping about 2 heavy units near own base on defense.\n");
         sb.append("Switch only when it is wholly necessary. If not wholly necessary, keep stance unchanged.\n");
+    }
+
+    private void appendPromptState(StringBuilder sb, Snapshot snapshot, boolean underAttack,
+                                   int myPressure, int enemyPressure) {
         sb.append("State:\n");
         sb.append("- map: ").append(snapshot.mapW).append("x").append(snapshot.mapH).append("\n");
         sb.append("- map_area: ").append(snapshot.mapArea).append("\n");
@@ -703,6 +744,9 @@ public class MCTSAgent extends NaiveMCTS {
         sb.append("- enemy_combat_units: ").append(snapshot.enemyCombat).append("\n");
         sb.append("- my_frontline_to_enemy_base: ").append(myPressure).append("\n");
         sb.append("- enemy_frontline_to_my_base: ").append(enemyPressure).append("\n");
+    }
+
+    private void appendPromptSchema(StringBuilder sb) {
         sb.append("JSON schema:\n");
         sb.append("{\"switch_required\":true|false,");
         sb.append("\"target_stance\":\"DEFEND|ATTACK\",");
@@ -711,8 +755,6 @@ public class MCTSAgent extends NaiveMCTS {
         sb.append("\"ranged_attack_heavy_defense\":true|false,");
         sb.append("\"reason\":\"short explanation\",");
         sb.append("\"wholly_necessary\":true|false(optional)}\n");
-        sb.append("Example: ").append(example);
-        return sb.toString();
     }
 
     private String callOllama(String prompt) throws Exception {
@@ -1064,68 +1106,97 @@ public class MCTSAgent extends NaiveMCTS {
         if (pa == null || preferredActions.isEmpty()) return 0;
         int score = 0;
         boolean rangedAttackHeavyDefense = isRangedAttackHeavyDefenseModeActive();
-        int myHeavy = rangedAttackHeavyDefense ? countUnits(activePlayer, gs_to_start_from, heavyType) : 0;
-        int myRanged = rangedAttackHeavyDefense ? countUnits(activePlayer, gs_to_start_from, rangedType) : 0;
+        int myHeavy = countUnits(activePlayer, gs_to_start_from, heavyType);
+        int myRanged = countUnits(activePlayer, gs_to_start_from, rangedType);
 
         for (Pair<Unit, UnitAction> uaa : pa.getActions()) {
             Unit u = uaa.m_a;
             UnitAction a = uaa.m_b;
-            int type = a.getType();
+            int type = a == null ? -1 : a.getType();
             Intent intent = classifyIntent(u, a, u.getPlayer());
 
-            if (preferredActions.contains("HARVEST") && type == UnitAction.TYPE_HARVEST) score += 2;
-            if (preferredActions.contains("RETURN") && type == UnitAction.TYPE_RETURN) score += 2;
+            score += scoreEconomyActionPreference(type);
+            score += scoreProductionActionPreference(a, myHeavy, myRanged, rangedAttackHeavyDefense);
+            score += scoreBaseProximityPreference(u, a, type);
+            score += scoreDefenseIntentPreference(intent);
+            score += scoreSplitFormationPreference(u, intent, rangedAttackHeavyDefense, myHeavy);
+            score += scoreStanceIntentPreference(intent);
+        }
+        return score;
+    }
 
-            if (type == UnitAction.TYPE_PRODUCE && a.getUnitType() != null) {
-                String produced = a.getUnitType().name.toUpperCase();
-                if (preferredActions.contains("PRODUCE_HEAVY") && "HEAVY".equals(produced)) score += 5;
-                if (preferredActions.contains("PRODUCE_RANGED") && "RANGED".equals(produced)) score += 5;
-                if (preferredActions.contains("PRODUCE_WORKER") && "WORKER".equals(produced)) score += 4;
-                if (preferredActions.contains("BUILD_BARRACKS") && "BARRACKS".equals(produced)) score += 6;
-                if (preferredActions.contains("PRODUCE_" + preferredUnit) && produced.equals(preferredUnit)) score += 5;
-                if (currentStance == Stance.ATTACK) {
-                    if ("RANGED".equals(produced)) score += myRanged <= myHeavy ? 4 : 2;
-                    if ("HEAVY".equals(produced)) score += myHeavy < myRanged ? 4 : 2;
-                }
-                if (rangedAttackHeavyDefense) {
-                    if ("RANGED".equals(produced)) score += 8;
-                    if ("HEAVY".equals(produced)) {
-                        score += myHeavy < HEAVY_DEFENSE_TARGET ? 4 : 0;
-                        if (myHeavy >= HEAVY_DEFENSE_TARGET + 1) score -= 3;
-                    }
-                }
-            }
+    private int scoreEconomyActionPreference(int actionType) {
+        int score = 0;
+        if (preferredActions.contains("HARVEST") && actionType == UnitAction.TYPE_HARVEST) score += 2;
+        if (preferredActions.contains("RETURN") && actionType == UnitAction.TYPE_RETURN) score += 2;
+        return score;
+    }
 
-            if (preferredActions.contains("ATTACK_NEAR_BASE")
-                && type == UnitAction.TYPE_ATTACK_LOCATION
-                && isActionNearAnyOwnBase(a, u.getPlayer(), baseDefenseRadius())) {
-                score += 3;
-            }
+    private int scoreProductionActionPreference(UnitAction action, int myHeavy, int myRanged,
+                                                boolean rangedAttackHeavyDefense) {
+        if (action == null || action.getType() != UnitAction.TYPE_PRODUCE || action.getUnitType() == null) return 0;
 
-            if (preferredActions.contains("DEFEND_BASE") && intent == Intent.DEFENSE) {
-                score += 2;
-            }
+        int score = 0;
+        String produced = action.getUnitType().name.toUpperCase();
+        if (preferredActions.contains("PRODUCE_HEAVY") && "HEAVY".equals(produced)) score += 5;
+        if (preferredActions.contains("PRODUCE_RANGED") && "RANGED".equals(produced)) score += 5;
+        if (preferredActions.contains("PRODUCE_WORKER") && "WORKER".equals(produced)) score += 4;
+        if (preferredActions.contains("BUILD_BARRACKS") && "BARRACKS".equals(produced)) score += 6;
+        if (preferredActions.contains("PRODUCE_" + preferredUnit) && produced.equals(preferredUnit)) score += 5;
 
-            if (rangedAttackHeavyDefense && u.getType() != null) {
-                if (u.getType() == rangedType) {
-                    if (intent == Intent.OFFENSE) score += 10;
-                    if (intent == Intent.DEFENSE) score -= 12;
-                } else if (u.getType() == heavyType) {
-                    if (intent == Intent.DEFENSE) score += 8;
-                    if (intent == Intent.OFFENSE && myHeavy <= HEAVY_DEFENSE_TARGET) score -= 8;
-                    if (intent == Intent.OFFENSE && myHeavy > HEAVY_DEFENSE_TARGET) score -= 3;
-                }
-            }
+        if (currentStance == Stance.ATTACK) {
+            if ("RANGED".equals(produced)) score += myRanged <= myHeavy ? 4 : 2;
+            if ("HEAVY".equals(produced)) score += myHeavy < myRanged ? 4 : 2;
+        }
 
-            if (currentStance == Stance.DEFEND) {
-                if (intent == Intent.DEFENSE) score += 3;
-                if (intent == Intent.OFFENSE) score -= 10;
-            } else {
-                if (intent == Intent.OFFENSE) score += 5;
-                if (intent == Intent.DEFENSE) score -= 10;
+        if (rangedAttackHeavyDefense) {
+            if ("RANGED".equals(produced)) score += 8;
+            if ("HEAVY".equals(produced)) {
+                score += myHeavy < HEAVY_DEFENSE_TARGET ? 4 : 0;
+                if (myHeavy >= HEAVY_DEFENSE_TARGET + 1) score -= 3;
             }
         }
         return score;
+    }
+
+    private int scoreBaseProximityPreference(Unit unit, UnitAction action, int actionType) {
+        if (unit == null || action == null) return 0;
+        if (!preferredActions.contains("ATTACK_NEAR_BASE")) return 0;
+        if (actionType != UnitAction.TYPE_ATTACK_LOCATION) return 0;
+        if (!isActionNearAnyOwnBase(action, unit.getPlayer(), baseDefenseRadius())) return 0;
+        return 3;
+    }
+
+    private int scoreDefenseIntentPreference(Intent intent) {
+        if (preferredActions.contains("DEFEND_BASE") && intent == Intent.DEFENSE) return 2;
+        return 0;
+    }
+
+    private int scoreSplitFormationPreference(Unit unit, Intent intent,
+                                              boolean rangedAttackHeavyDefense, int myHeavy) {
+        if (!rangedAttackHeavyDefense || unit == null || unit.getType() == null) return 0;
+        if (unit.getType() == rangedType) {
+            if (intent == Intent.OFFENSE) return 10;
+            if (intent == Intent.DEFENSE) return -12;
+            return 0;
+        }
+        if (unit.getType() == heavyType) {
+            if (intent == Intent.DEFENSE) return 8;
+            if (intent == Intent.OFFENSE && myHeavy <= HEAVY_DEFENSE_TARGET) return -8;
+            if (intent == Intent.OFFENSE && myHeavy > HEAVY_DEFENSE_TARGET) return -3;
+        }
+        return 0;
+    }
+
+    private int scoreStanceIntentPreference(Intent intent) {
+        if (currentStance == Stance.DEFEND) {
+            if (intent == Intent.DEFENSE) return 3;
+            if (intent == Intent.OFFENSE) return -10;
+            return 0;
+        }
+        if (intent == Intent.OFFENSE) return 5;
+        if (intent == Intent.DEFENSE) return -10;
+        return 0;
     }
 
     /**
