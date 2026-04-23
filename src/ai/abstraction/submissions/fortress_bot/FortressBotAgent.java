@@ -2,7 +2,9 @@ package ai.abstraction.submissions.fortress_bot;
 
 import ai.abstraction.AbstractAction;
 import ai.abstraction.AbstractionLayerAI;
+import ai.abstraction.HeavyRush;
 import ai.abstraction.Harvest;
+import ai.abstraction.WorkerRush;
 import ai.abstraction.WorkerRushPlusPlus;
 import ai.abstraction.pathfinding.AStarPathFinding;
 import ai.core.AI;
@@ -26,6 +28,8 @@ import rts.GameState;
 import rts.PhysicalGameState;
 import rts.Player;
 import rts.PlayerAction;
+import rts.UnitAction;
+import rts.UnitActionAssignment;
 import rts.units.Unit;
 import rts.units.UnitType;
 import rts.units.UnitTypeTable;
@@ -107,6 +111,12 @@ public class FortressBotAgent extends AbstractionLayerAI {
         }
     }
 
+    private enum MirrorEchoVerdict {
+        APPROVED,
+        DENIED,
+        ERROR
+    }
+
     private static class StateSnapshot {
         int myWorkerCount;
         int myCombatCount;
@@ -133,6 +143,10 @@ public class FortressBotAgent extends AbstractionLayerAI {
         int mapWidth;
         int mapHeight;
         int resourceNodeCount;
+        boolean enemyBarracksTrainingLight;
+        boolean enemyBarracksTrainingHeavy;
+        boolean enemyBarracksTrainingRanged;
+        boolean enemyWorkerBuildingBarracks;
 
         List<Unit> myBases = new ArrayList<>();
         List<Unit> enemyBases = new ArrayList<>();
@@ -149,6 +163,19 @@ public class FortressBotAgent extends AbstractionLayerAI {
     private static final boolean DEBUG =
             Boolean.parseBoolean(System.getenv().getOrDefault("ORACLE_STRAT_DEBUG", "false"));
     private static final int CONSULT_INTERVAL = getEnvInt("OLLAMA_SUBMISSION_INTERVAL", 160);
+    private static final int MIRROR_ECHO_INTERVAL = getEnvInt("OLLAMA_SUBMISSION_MIRROR_ECHO_INTERVAL", 90);
+    private static final int LARGE_MAP_MIRROR_END_TICK = getEnvInt("FORTRESS_LARGE_MAP_MIRROR_END_TICK", 620);
+    private static final int LARGE_MAP_WORKER_MIRROR_END_TICK =
+            getEnvInt("FORTRESS_LARGE_MAP_WORKER_MIRROR_END_TICK", 760);
+    private static final int LARGE_MAP_FORCE_CLOSEOUT_TICK =
+            getEnvInt("FORTRESS_LARGE_MAP_FORCE_CLOSEOUT_TICK", 620);
+    private static final int LARGE_MAP_FORCE_CLOSEOUT_MIN_COMBAT =
+            getEnvInt("FORTRESS_LARGE_MAP_FORCE_CLOSEOUT_MIN_COMBAT", 3);
+    private static final int MAX_MIRROR_FAILS = getEnvInt("FORTRESS_MAX_MIRROR_FAILS", 2);
+    private static final boolean LARGE_MAP_HEAVY_MIRROR_PRECOMBAT =
+            Boolean.parseBoolean(System.getenv().getOrDefault("FORTRESS_LARGE_MAP_HEAVY_MIRROR_PRECOMBAT", "false"));
+    private static final boolean ENABLE_LARGE_MAP_WORKER_MIRROR_AFTER_REVEAL =
+            Boolean.parseBoolean(System.getenv().getOrDefault("FORTRESS_ENABLE_LARGE_MAP_WORKER_MIRROR_AFTER_REVEAL", "false"));
     private static final int CONNECT_TIMEOUT_MS = getEnvInt("OLLAMA_SUBMISSION_CONNECT_TIMEOUT_MS", 1800);
     private static final int READ_TIMEOUT_MS = getEnvInt("OLLAMA_SUBMISSION_READ_TIMEOUT_MS", 15000);
 
@@ -183,8 +210,15 @@ public class FortressBotAgent extends AbstractionLayerAI {
     private int lastConsultTick = Integer.MIN_VALUE / 4;
     private int modeLockedUntilTick = 0;
     private int lastWaveTick = Integer.MIN_VALUE / 4;
+    private AI workerRushCounterMirror;
     private AI workerRushMirror;
+    private AI heavyRushMirror;
     private boolean workerRushMirrorLatched;
+    private String approvedMirrorCounterName;
+    private int approvedMirrorCounterTick = Integer.MIN_VALUE / 4;
+    private int heavyMirrorFailureCount;
+    private int workerCounterMirrorFailureCount;
+    private int workerMirrorFailureCount;
 
     public FortressBotAgent(UnitTypeTable aUtt) {
         super(new AStarPathFinding());
@@ -199,8 +233,19 @@ public class FortressBotAgent extends AbstractionLayerAI {
         modeLockedUntilTick = 0;
         lastWaveTick = Integer.MIN_VALUE / 4;
         workerRushMirrorLatched = false;
+        approvedMirrorCounterName = null;
+        approvedMirrorCounterTick = Integer.MIN_VALUE / 4;
+        heavyMirrorFailureCount = 0;
+        workerCounterMirrorFailureCount = 0;
+        workerMirrorFailureCount = 0;
         if (workerRushMirror != null) {
             workerRushMirror.reset();
+        }
+        if (workerRushCounterMirror != null) {
+            workerRushCounterMirror.reset();
+        }
+        if (heavyRushMirror != null) {
+            heavyRushMirror.reset();
         }
     }
 
@@ -213,7 +258,9 @@ public class FortressBotAgent extends AbstractionLayerAI {
             lightType = utt.getUnitType("Light");
             rangedType = utt.getUnitType("Ranged");
             heavyType = utt.getUnitType("Heavy");
+            workerRushCounterMirror = new WorkerRush(utt, new AStarPathFinding());
             workerRushMirror = new WorkerRushPlusPlus(utt, new AStarPathFinding());
+            heavyRushMirror = new HeavyRush(utt, new AStarPathFinding());
         }
         reset();
     }
@@ -226,8 +273,19 @@ public class FortressBotAgent extends AbstractionLayerAI {
         clone.modeLockedUntilTick = modeLockedUntilTick;
         clone.lastWaveTick = lastWaveTick;
         clone.workerRushMirrorLatched = workerRushMirrorLatched;
+        clone.approvedMirrorCounterName = approvedMirrorCounterName;
+        clone.approvedMirrorCounterTick = approvedMirrorCounterTick;
+        clone.heavyMirrorFailureCount = heavyMirrorFailureCount;
+        clone.workerCounterMirrorFailureCount = workerCounterMirrorFailureCount;
+        clone.workerMirrorFailureCount = workerMirrorFailureCount;
         if (workerRushMirror != null) {
             clone.workerRushMirror = workerRushMirror.clone();
+        }
+        if (workerRushCounterMirror != null) {
+            clone.workerRushCounterMirror = workerRushCounterMirror.clone();
+        }
+        if (heavyRushMirror != null) {
+            clone.heavyRushMirror = heavyRushMirror.clone();
         }
         return clone;
     }
@@ -240,13 +298,72 @@ public class FortressBotAgent extends AbstractionLayerAI {
 
         StateSnapshot snapshot = inspectState(player, gs);
         updateWorkerRushMirrorLatch(gs, snapshot);
+        if (DEBUG && isLargeMap(snapshot) && gs.getTime() % 80 == 0) {
+            debug(
+                    "T=%d eRes=%d eW=%d eB=%d eC=%d eL=%d eH=%d nearW=%d wBuildB=%s trainL=%s trainH=%s trainR=%s",
+                    gs.getTime(),
+                    snapshot.enemyResources,
+                    snapshot.enemyWorkerCount,
+                    snapshot.enemyBarracksCount,
+                    snapshot.enemyCombatCount,
+                    snapshot.enemyLightCount,
+                    snapshot.enemyHeavyCount,
+                    snapshot.enemyWorkersNearBase,
+                    snapshot.enemyWorkerBuildingBarracks,
+                    snapshot.enemyBarracksTrainingLight,
+                    snapshot.enemyBarracksTrainingHeavy,
+                    snapshot.enemyBarracksTrainingRanged);
+        }
 
-        if (shouldDelegateToWorkerRushMirror(gs, snapshot) && workerRushMirror != null) {
-            try {
-                return workerRushMirror.getAction(player, gs);
-            } catch (Throwable e) {
-                workerRushMirrorLatched = false;
-                debug("T=%d mirror-delegate failed: %s", gs.getTime(), e.getMessage());
+        boolean useLargeMapHeavyMirror = shouldDelegateToLargeMapHeavyMirror(gs, snapshot);
+        if (useLargeMapHeavyMirror
+                && heavyRushMirror != null
+                && heavyMirrorFailureCount < Math.max(0, MAX_MIRROR_FAILS)) {
+            if (confirmMirrorDelegateEcho(gs, snapshot, "HEAVY_RUSH_MIRROR")) {
+                if (DEBUG && gs.getTime() % 80 == 0) {
+                    debug("T=%d delegate=heavy-mirror", gs.getTime());
+                }
+                try {
+                    return heavyRushMirror.getAction(player, gs);
+                } catch (Throwable e) {
+                    heavyMirrorFailureCount++;
+                    debug("T=%d heavy-mirror-delegate failed: %s", gs.getTime(), e.getMessage());
+                }
+            }
+        }
+
+        boolean useLargeMapWorkerCounter = shouldDelegateToLargeMapWorkerRushCounter(gs, snapshot);
+        if (useLargeMapWorkerCounter
+                && workerRushCounterMirror != null
+                && workerCounterMirrorFailureCount < Math.max(0, MAX_MIRROR_FAILS)) {
+            if (confirmMirrorDelegateEcho(gs, snapshot, "WORKER_RUSH_COUNTER_MIRROR")) {
+                if (DEBUG && gs.getTime() % 80 == 0) {
+                    debug("T=%d delegate=worker-counter-ranged-mirror", gs.getTime());
+                }
+                try {
+                    return workerRushCounterMirror.getAction(player, gs);
+                } catch (Throwable e) {
+                    workerCounterMirrorFailureCount++;
+                    debug("T=%d worker-counter-delegate failed: %s", gs.getTime(), e.getMessage());
+                }
+            }
+        }
+
+        boolean useWorkerMirror = shouldDelegateToWorkerRushMirror(gs, snapshot);
+        if (useWorkerMirror
+                && workerRushMirror != null
+                && workerMirrorFailureCount < Math.max(0, MAX_MIRROR_FAILS)) {
+            if (confirmMirrorDelegateEcho(gs, snapshot, "WORKER_RUSH_PLUSPLUS_MIRROR")) {
+                if (DEBUG && gs.getTime() % 80 == 0) {
+                    debug("T=%d delegate=worker-plusplus-mirror", gs.getTime());
+                }
+                try {
+                    return workerRushMirror.getAction(player, gs);
+                } catch (Throwable e) {
+                    workerMirrorFailureCount++;
+                    workerRushMirrorLatched = false;
+                    debug("T=%d mirror-delegate failed: %s", gs.getTime(), e.getMessage());
+                }
             }
         }
 
@@ -257,7 +374,10 @@ public class FortressBotAgent extends AbstractionLayerAI {
 
         int consultInterval = consultIntervalFor(snapshot);
         StrategyDirective proposal;
-        if (gs.getTime() == 0 || gs.getTime() - lastConsultTick >= consultInterval) {
+        if (isLargeMap(snapshot)) {
+            proposal = fallbackDirective(snapshot, gs);
+            lastConsultTick = gs.getTime();
+        } else if (gs.getTime() == 0 || gs.getTime() - lastConsultTick >= consultInterval) {
             proposal = askOllama(player, gs, snapshot, consultInterval);
             if (proposal == null) {
                 proposal = fallbackDirective(snapshot, gs);
@@ -271,11 +391,13 @@ public class FortressBotAgent extends AbstractionLayerAI {
 
         if (DEBUG && gs.getTime() % 120 == 0) {
             debug(
-                    "T=%d mode=%s lock=%d myW=%d myC=%d enemyC=%d threat=%d rationale=%s",
+                    "T=%d mode=%s lock=%d myW=%d myB=%d myR=%d myC=%d enemyC=%d threat=%d rationale=%s",
                     gs.getTime(),
                     currentDirective.mode,
                     modeLockedUntilTick,
                     snapshot.myWorkerCount,
+                    snapshot.myBarracksCount,
+                    snapshot.myResources,
                     snapshot.myCombatCount,
                     snapshot.enemyCombatCount,
                     snapshot.enemyThreatNearBase,
@@ -300,17 +422,21 @@ public class FortressBotAgent extends AbstractionLayerAI {
     }
 
     private boolean shouldDelegateToWorkerRushMirror(GameState gs, StateSnapshot snapshot) {
-        if (snapshot == null || gs.getTime() > 1490) {
+        if (snapshot == null) {
+            return false;
+        }
+        if (isLargeMap(snapshot)) {
+            if (gs.getTime() > LARGE_MAP_WORKER_MIRROR_END_TICK) {
+                return false;
+            }
+        } else if (gs.getTime() > 1490) {
             return false;
         }
         if (isSmallMap(snapshot)) {
             return true;
         }
-        return shouldDelegateLargeMapPressure(gs, snapshot);
-    }
-
-    private boolean shouldUseAntiWorkerRushAllIn(GameState gs, StateSnapshot snapshot) {
-        return false;
+        return shouldDelegateLargeMapPressure(gs, snapshot)
+                || shouldDelegateToLargeMapWorkerMirrorAfterReveal(gs, snapshot);
     }
 
     private void updateWorkerRushMirrorLatch(GameState gs, StateSnapshot snapshot) {
@@ -335,10 +461,61 @@ public class FortressBotAgent extends AbstractionLayerAI {
         if (!isLargeMap(snapshot) || gs.getTime() > 1050) {
             return false;
         }
-        boolean enemyCommittedTech = snapshot.enemyBarracksCount > 0 || snapshot.enemyCombatCount > 0;
-        boolean noSkirmishersSeen = snapshot.enemyLightCount == 0 && snapshot.enemyRangedCount == 0;
+        // Keep mirror pressure only during enemy tech-up. If barracks is explicitly training Light,
+        // defer to heavy mirror instead.
+        boolean enemyTechingNoCombat = snapshot.enemyBarracksCount > 0 && snapshot.enemyCombatCount == 0;
+        boolean notTrainingLightSkirmisher = !snapshot.enemyBarracksTrainingLight && !snapshot.enemyBarracksTrainingRanged;
+        boolean enemyStillLowBank = snapshot.enemyResources < 2 || snapshot.enemyBarracksTrainingHeavy;
         boolean noImmediateWorkerSwarm = snapshot.enemyWorkersNearBase <= 1 && snapshot.enemyThreatNearBase <= 1;
-        return enemyCommittedTech && noSkirmishersSeen && noImmediateWorkerSwarm;
+        return enemyTechingNoCombat && notTrainingLightSkirmisher && enemyStillLowBank && noImmediateWorkerSwarm;
+    }
+
+    private boolean shouldDelegateToLargeMapWorkerRushCounter(GameState gs, StateSnapshot snapshot) {
+        if (snapshot == null
+                || !isLargeMap(snapshot)
+                || gs.getTime() > LARGE_MAP_WORKER_MIRROR_END_TICK) {
+            return false;
+        }
+        boolean noTechCommitted = snapshot.enemyBarracksCount == 0
+                && snapshot.enemyCombatCount == 0
+                && !snapshot.enemyWorkerBuildingBarracks;
+        boolean workerMassPressure = snapshot.enemyWorkerCount >= 2;
+        return noTechCommitted && workerMassPressure;
+    }
+
+    private boolean shouldDelegateToLargeMapWorkerMirrorAfterReveal(GameState gs, StateSnapshot snapshot) {
+        if (!ENABLE_LARGE_MAP_WORKER_MIRROR_AFTER_REVEAL) {
+            return false;
+        }
+        if (snapshot == null
+                || !isLargeMap(snapshot)
+                || gs.getTime() > LARGE_MAP_WORKER_MIRROR_END_TICK) {
+            return false;
+        }
+        // If barracks is training Heavy (or heavy is already revealed), WorkerRushPlusPlus remains strong.
+        return snapshot.enemyBarracksTrainingHeavy
+                || (snapshot.enemyHeavyCount >= 1
+                && snapshot.enemyLightCount == 0
+                && snapshot.enemyRangedCount == 0);
+    }
+
+    private boolean shouldDelegateToLargeMapHeavyMirror(GameState gs, StateSnapshot snapshot) {
+        if (snapshot == null || !isLargeMap(snapshot) || gs.getTime() > LARGE_MAP_MIRROR_END_TICK) {
+            return false;
+        }
+        boolean pureLightPressure = snapshot.enemyLightCount >= 1
+                && snapshot.enemyHeavyCount == 0
+                && snapshot.enemyRangedCount == 0;
+        boolean confirmedLightTrain = snapshot.enemyBarracksTrainingLight;
+        // During pre-combat barracks tech, default to heavy mirror unless heavy production is confirmed.
+        boolean preCombatBarracksWindow = LARGE_MAP_HEAVY_MIRROR_PRECOMBAT
+                && gs.getTime() <= 500
+                && snapshot.enemyBarracksCount > 0
+                && snapshot.enemyCombatCount == 0
+                && !snapshot.enemyBarracksTrainingHeavy
+                && snapshot.enemyHeavyCount == 0
+                && snapshot.enemyRangedCount == 0;
+        return pureLightPressure || confirmedLightTrain || preCombatBarracksWindow;
     }
 
     private void executeScriptedOpening(int player, GameState gs, StateSnapshot snapshot) {
@@ -359,24 +536,9 @@ public class FortressBotAgent extends AbstractionLayerAI {
     }
 
     private void applyDirectiveWithLock(GameState gs, StateSnapshot snapshot, StrategyDirective proposal) {
-        boolean antiWorkerRushAllIn = shouldUseAntiWorkerRushAllIn(gs, snapshot);
-        if (antiWorkerRushAllIn) {
-            proposal.mode = StrategyMode.ALL_IN_PUSH;
-            proposal.holdTicks = Math.max(proposal.holdTicks, 120);
-            proposal.targetWorkers = Math.max(proposal.targetWorkers, Math.min(8, Math.max(4, snapshot.enemyWorkerCount + 1)));
-            proposal.targetBarracks = 0;
-            proposal.attackWaveSize = 1;
-            proposal.wavePeriod = 35;
-            proposal.defendRadius = 5;
-            proposal.aggression = Math.max(proposal.aggression, 0.95);
-            proposal.raidWorkers = 6;
-            proposal.expandBase = false;
-            proposal.primaryUnit = "LIGHT";
-            proposal.rationale = "small-map-anti-worker-rush-all-in";
-        }
-
         boolean workerRushDefense = shouldActivateWorkerRushDefense(gs, snapshot);
-        if (workerRushDefense && !antiWorkerRushAllIn) {
+        boolean largeMapLightRushDefense = shouldActivateLargeMapLightRushDefense(gs, snapshot);
+        if (workerRushDefense) {
             proposal.mode = StrategyMode.FORTRESS_DEFENSE;
             proposal.holdTicks = Math.max(proposal.holdTicks, 120);
             proposal.targetWorkers = Math.max(proposal.targetWorkers, Math.min(8, Math.max(4, snapshot.enemyWorkersNearBase + 2)));
@@ -389,8 +551,24 @@ public class FortressBotAgent extends AbstractionLayerAI {
             proposal.primaryUnit = "LIGHT";
             proposal.rationale = "worker-rush-defense";
         }
+        if (largeMapLightRushDefense) {
+            proposal.mode = StrategyMode.FORTRESS_DEFENSE;
+            proposal.holdTicks = Math.max(proposal.holdTicks, 120);
+            proposal.targetWorkers = Math.max(proposal.targetWorkers, 4);
+            proposal.targetBarracks = Math.max(proposal.targetBarracks, 2);
+            proposal.attackWaveSize = Math.max(proposal.attackWaveSize, 3);
+            proposal.wavePeriod = Math.min(proposal.wavePeriod, 85);
+            proposal.defendRadius = Math.max(proposal.defendRadius, 8);
+            proposal.aggression = Math.min(proposal.aggression, 0.55);
+            proposal.raidWorkers = 0;
+            proposal.expandBase = false;
+            proposal.primaryUnit = "HEAVY";
+            proposal.rationale = "large-map-light-rush-defense";
+        }
 
-        boolean forcedAllOutRush = !workerRushDefense && !antiWorkerRushAllIn && shouldForceAllOutRush(gs, snapshot);
+        boolean forcedAllOutRush = !workerRushDefense
+                && !largeMapLightRushDefense
+                && shouldForceAllOutRush(gs, snapshot);
         if (forcedAllOutRush) {
             proposal.mode = StrategyMode.ALL_IN_PUSH;
             proposal.holdTicks = Math.max(proposal.holdTicks, 120);
@@ -413,6 +591,62 @@ public class FortressBotAgent extends AbstractionLayerAI {
             proposal.rationale = "large-map-closeout";
         }
 
+        boolean largeMapHeavyStalematePush = isLargeMap(snapshot)
+                && gs.getTime() >= 1050
+                && snapshot.enemyHeavyCount > 0
+                && snapshot.enemyLightCount == 0
+                && snapshot.enemyRangedCount == 0
+                && snapshot.myCombatCount >= Math.max(1, snapshot.enemyCombatCount)
+                && snapshot.myWorkerCount >= snapshot.enemyWorkerCount;
+        if (largeMapHeavyStalematePush) {
+            proposal.mode = StrategyMode.ALL_IN_PUSH;
+            proposal.holdTicks = Math.max(proposal.holdTicks, 120);
+            proposal.targetBarracks = Math.max(proposal.targetBarracks, 2);
+            proposal.attackWaveSize = 1;
+            proposal.wavePeriod = Math.min(proposal.wavePeriod, 50);
+            proposal.raidWorkers = Math.max(proposal.raidWorkers, 2);
+            proposal.aggression = Math.max(proposal.aggression, 0.92);
+            proposal.rationale = "large-map-heavy-stalemate-break";
+        }
+
+        boolean largeMapWorkerRushCloseout = isLargeMap(snapshot)
+                && gs.getTime() >= 900
+                && snapshot.enemyBarracksCount == 0
+                && snapshot.enemyCombatCount == 0
+                && snapshot.enemyWorkerCount >= 3
+                && snapshot.myBaseCount > 0
+                && snapshot.myWorkerCount >= Math.max(3, snapshot.enemyWorkerCount - 1);
+        if (largeMapWorkerRushCloseout) {
+            proposal.mode = StrategyMode.ALL_IN_PUSH;
+            proposal.holdTicks = Math.max(proposal.holdTicks, 120);
+            proposal.targetBarracks = Math.max(proposal.targetBarracks, 1);
+            proposal.attackWaveSize = 1;
+            proposal.wavePeriod = Math.min(proposal.wavePeriod, 40);
+            proposal.raidWorkers = Math.max(proposal.raidWorkers, 6);
+            proposal.aggression = Math.max(proposal.aggression, 0.98);
+            proposal.rationale = "large-map-worker-rush-closeout";
+        }
+
+        boolean largeMapRushMatchupCloseout = isLargeMap(snapshot)
+                && gs.getTime() >= LARGE_MAP_FORCE_CLOSEOUT_TICK
+                && snapshot.enemyBaseCount > 0
+                && snapshot.enemyWorkerCount <= 1
+                && snapshot.enemyRangedCount == 0
+                && snapshot.myCombatCount >= Math.max(1, LARGE_MAP_FORCE_CLOSEOUT_MIN_COMBAT)
+                && snapshot.myWorkerCount >= 2;
+        if (largeMapRushMatchupCloseout) {
+            proposal.mode = StrategyMode.ALL_IN_PUSH;
+            proposal.holdTicks = Math.max(proposal.holdTicks, 120);
+            proposal.targetWorkers = 2;
+            proposal.targetBarracks = Math.max(proposal.targetBarracks, 2);
+            proposal.attackWaveSize = 1;
+            proposal.wavePeriod = Math.min(proposal.wavePeriod, 40);
+            proposal.raidWorkers = Math.max(proposal.raidWorkers, 3);
+            proposal.aggression = Math.max(proposal.aggression, 0.95);
+            proposal.expandBase = false;
+            proposal.rationale = "large-map-rush-matchup-closeout";
+        }
+
         StrategyMode emergencyMode = emergencyOverride(snapshot);
         if (emergencyMode != null) {
             proposal.mode = emergencyMode;
@@ -425,9 +659,12 @@ public class FortressBotAgent extends AbstractionLayerAI {
         boolean canSwitch = !locked
                 || emergencyMode != null
                 || workerRushDefense
-                || antiWorkerRushAllIn
+                || largeMapLightRushDefense
                 || forcedAllOutRush
                 || largeMapCloseout
+                || largeMapHeavyStalematePush
+                || largeMapWorkerRushCloseout
+                || largeMapRushMatchupCloseout
                 || proposal.mode == StrategyMode.FORTRESS_DEFENSE;
 
         if (wantsSwitch && canSwitch) {
@@ -501,7 +738,6 @@ public class FortressBotAgent extends AbstractionLayerAI {
 
         List<Unit> freeWorkers = new ArrayList<>(myWorkers);
         boolean workerRushDefense = shouldActivateWorkerRushDefense(gs, snapshot);
-        boolean antiWorkerRushAllIn = shouldUseAntiWorkerRushAllIn(gs, snapshot);
 
         if (myBases.isEmpty() && !freeWorkers.isEmpty() && resourcesLeft >= baseType.cost) {
             Unit builder = chooseBuilder(freeWorkers, anchorBase);
@@ -537,13 +773,13 @@ public class FortressBotAgent extends AbstractionLayerAI {
         }
 
         int desiredBarracks = clampInt(directive.targetBarracks, 0, 3);
-        if (antiWorkerRushAllIn) {
-            desiredBarracks = 0;
-        }
         if (workerRushDefense) {
             boolean stabilizedDefense = snapshot.enemyWorkersNearBase == 0
                     && snapshot.myWorkerCount >= Math.max(4, snapshot.enemyWorkerCount);
-            desiredBarracks = stabilizedDefense ? 1 : 0;
+            boolean largeMapCounterTechWindow = isLargeMap(snapshot)
+                    && snapshot.enemyCombatCount == 0
+                    && snapshot.myWorkerCount >= Math.max(4, snapshot.enemyWorkersNearBase + 1);
+            desiredBarracks = largeMapCounterTechWindow ? Math.max(desiredBarracks, 1) : (stabilizedDefense ? 1 : 0);
         }
         if (isLargeMap(snapshot) && snapshot.enemyCombatCount > 0) {
             desiredBarracks = Math.max(desiredBarracks, 1);
@@ -559,7 +795,41 @@ public class FortressBotAgent extends AbstractionLayerAI {
             if (builder != null) {
                 int bx = anchorBase != null ? anchorBase.getX() : builder.getX();
                 int by = anchorBase != null ? anchorBase.getY() : builder.getY();
-                if (tryBuild(builder, barracksType, bx, by, reservedPositions, me, pgs)) {
+                if (isLargeMap(snapshot)
+                        && directive.mode == StrategyMode.ALL_IN_PUSH
+                        && snapshot.enemyBases != null
+                        && !snapshot.enemyBases.isEmpty()) {
+                    Unit enemyAnchor = closestUnit(builder, snapshot.enemyBases);
+                    if (enemyAnchor != null) {
+                        // In large-map all-ins, place production forward to cut reinforcement travel time.
+                        bx = clampInt((builder.getX() + enemyAnchor.getX()) / 2, 0, pgs.getWidth() - 1);
+                        by = clampInt((builder.getY() + enemyAnchor.getY()) / 2, 0, pgs.getHeight() - 1);
+                    }
+                }
+                boolean builtBarracks = tryBuild(builder, barracksType, bx, by, reservedPositions, me, pgs);
+                if (!builtBarracks) {
+                    builtBarracks = tryBuild(
+                            builder,
+                            barracksType,
+                            builder.getX(),
+                            builder.getY(),
+                            reservedPositions,
+                            me,
+                            pgs);
+                }
+                if (!builtBarracks && anchorBase != null) {
+                    int fallbackX = clampInt(anchorBase.getX() + (player == 0 ? -2 : 2), 0, pgs.getWidth() - 1);
+                    int fallbackY = clampInt(anchorBase.getY() + 2, 0, pgs.getHeight() - 1);
+                    builtBarracks = tryBuild(
+                            builder,
+                            barracksType,
+                            fallbackX,
+                            fallbackY,
+                            reservedPositions,
+                            me,
+                            pgs);
+                }
+                if (builtBarracks) {
                     resourcesLeft -= barracksType.cost;
                     freeWorkers.remove(builder);
                 }
@@ -612,9 +882,9 @@ public class FortressBotAgent extends AbstractionLayerAI {
         }
 
         boolean earlyBarracksSnipe = shouldDoEarlyBarracksSnipe(gs, snapshot, myWorkers.size());
-        boolean forcedAllOutRush = !workerRushDefense && !antiWorkerRushAllIn && shouldForceAllOutRush(gs, snapshot);
+        boolean forcedAllOutRush = !workerRushDefense && shouldForceAllOutRush(gs, snapshot);
         boolean allowNoHomeReserve =
-                (canAllWorkersCommitForFinisher(snapshot) || forcedAllOutRush || antiWorkerRushAllIn)
+                (canAllWorkersCommitForFinisher(snapshot) || forcedAllOutRush)
                         && !earlyBarracksSnipe
                         && !workerRushDefense;
         Unit homeReserveWorker = null;
@@ -625,7 +895,7 @@ public class FortressBotAgent extends AbstractionLayerAI {
             }
         }
 
-        if ((forcedAllOutRush || antiWorkerRushAllIn) && !freeWorkers.isEmpty()) {
+        if (forcedAllOutRush && !freeWorkers.isEmpty()) {
             for (Unit worker : freeWorkers) {
                 Unit target = chooseAttackTarget(worker, player, snapshot.enemyUnits, directive, false);
                 if (target != null) {
@@ -647,6 +917,9 @@ public class FortressBotAgent extends AbstractionLayerAI {
             int raidWorkers = clampInt(directive.raidWorkers, 0, availableWorkers);
             boolean largeMapHeavyPressure = isLargeMap(snapshot)
                     && snapshot.enemyHeavyCount > 0
+                    && snapshot.enemyClosestToBase <= 10;
+            boolean largeMapLightPressure = isLargeMap(snapshot)
+                    && snapshot.enemyLightCount > 0
                     && snapshot.enemyClosestToBase <= 10;
             if (directive.mode == StrategyMode.WORKER_SWARM) {
                 raidWorkers = Math.max(raidWorkers, Math.max(0, availableWorkers - 2));
@@ -670,8 +943,15 @@ public class FortressBotAgent extends AbstractionLayerAI {
                 defensivePull = Math.max(defensivePull, Math.min(3, availableWorkers));
                 raidWorkers = 0;
             }
+            if (largeMapLightPressure) {
+                defensivePull = Math.max(defensivePull, Math.min(2, availableWorkers));
+                raidWorkers = 0;
+            }
 
             int minimumHarvesters = workerRushDefense ? 0 : 1;
+            if (workerRushDefense && isLargeMap(snapshot)) {
+                minimumHarvesters = 1;
+            }
             if (directive.mode == StrategyMode.BOOM_THEN_PUSH) {
                 int floor = gs.getTime() < BOOM_EARLY_TICK
                         ? Math.max(BOOM_MIN_HARVESTERS_EARLY, workerGoal - 1)
@@ -778,7 +1058,8 @@ public class FortressBotAgent extends AbstractionLayerAI {
     }
 
     private boolean shouldLaunchWave(GameState gs, StateSnapshot snapshot, StrategyDirective directive, int myCombat) {
-        if (shouldActivateWorkerRushDefense(gs, snapshot)) {
+        if (shouldActivateWorkerRushDefense(gs, snapshot)
+                || shouldActivateLargeMapLightRushDefense(gs, snapshot)) {
             return false;
         }
         if (isLargeMap(snapshot) && gs.getTime() >= 700 && myCombat >= 1 && snapshot.enemyCombatCount == 0) {
@@ -808,6 +1089,10 @@ public class FortressBotAgent extends AbstractionLayerAI {
             requested = "HEAVY";
         } else if (isLargeMap(snapshot) && snapshot.enemyHeavyCount >= 1 && snapshot.enemyCombatCount >= snapshot.myCombatCount) {
             requested = "RANGED";
+        } else if (isLargeMap(snapshot)
+                && snapshot.enemyLightCount >= Math.max(1, snapshot.enemyHeavyCount + snapshot.enemyRangedCount)
+                && snapshot.enemyClosestToBase <= 12) {
+            requested = "HEAVY";
         } else if (snapshot.enemyRangedCount > snapshot.enemyHeavyCount + 1) {
             requested = "HEAVY";
         } else if (snapshot.enemyHeavyCount > snapshot.enemyRangedCount + 1) {
@@ -827,6 +1112,108 @@ public class FortressBotAgent extends AbstractionLayerAI {
             return lightType;
         }
         return heavyType;
+    }
+
+    private boolean confirmMirrorDelegateEcho(GameState gs, StateSnapshot snapshot, String counterName) {
+        if (counterName == null || counterName.isEmpty()) {
+            return false;
+        }
+        int interval = Math.max(1, MIRROR_ECHO_INTERVAL);
+        if (counterName.equals(approvedMirrorCounterName)
+                && gs.getTime() - approvedMirrorCounterTick < interval) {
+            return true;
+        }
+
+        MirrorEchoVerdict verdict = askMirrorEcho(counterName, gs, snapshot);
+        if (verdict == MirrorEchoVerdict.APPROVED || verdict == MirrorEchoVerdict.ERROR) {
+            approvedMirrorCounterName = counterName;
+            approvedMirrorCounterTick = gs.getTime();
+            return true;
+        }
+        return false;
+    }
+
+    private MirrorEchoVerdict askMirrorEcho(String counterName, GameState gs, StateSnapshot snapshot) {
+        try {
+            String prompt = buildMirrorEchoPrompt(counterName, gs, snapshot);
+            String response = callOllama(prompt);
+            String echoed = parseMirrorEcho(response);
+            if (counterName.equals(echoed)) {
+                return MirrorEchoVerdict.APPROVED;
+            }
+            if (DEBUG) {
+                debug(
+                        "T=%d mirror echo denied expected=%s actual=%s",
+                        gs.getTime(),
+                        counterName,
+                        echoed == null ? "<null>" : echoed);
+            }
+            return MirrorEchoVerdict.DENIED;
+        } catch (Exception e) {
+            debug("T=%d mirror echo call failed for %s: %s", gs.getTime(), counterName, e.getMessage());
+            return MirrorEchoVerdict.ERROR;
+        }
+    }
+
+    private String buildMirrorEchoPrompt(String counterName, GameState gs, StateSnapshot snapshot) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("You are validating a deterministic RTS counter selection.\\n");
+        sb.append("Task: echo ").append(counterName).append("\\n");
+        sb.append("Return exactly one token and nothing else: ").append(counterName).append("\\n");
+        sb.append("No JSON, no punctuation, no explanation.\\n");
+        if (snapshot != null) {
+            sb.append("time=").append(gs.getTime()).append(" map=")
+                    .append(snapshot.mapWidth).append("x").append(snapshot.mapHeight).append("\\n");
+        }
+        return sb.toString();
+    }
+
+    private String parseMirrorEcho(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String text = raw.trim();
+        if (text.isEmpty()) {
+            return null;
+        }
+
+        JsonObject obj = parseJsonObject(text);
+        if (obj != null) {
+            if (obj.has("counter")) {
+                return normalizeCounterName(readString(obj, "counter", null));
+            }
+            if (obj.has("strategy")) {
+                return normalizeCounterName(readString(obj, "strategy", null));
+            }
+            if (obj.has("response")) {
+                return normalizeCounterName(readString(obj, "response", null));
+            }
+        }
+
+        String firstLine = text.split("\\R", 2)[0];
+        return normalizeCounterName(firstLine);
+    }
+
+    private String normalizeCounterName(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String token = raw.trim();
+        if (token.isEmpty()) {
+            return null;
+        }
+        if ((token.startsWith("\"") && token.endsWith("\""))
+                || (token.startsWith("`") && token.endsWith("`"))) {
+            if (token.length() > 1) {
+                token = token.substring(1, token.length() - 1).trim();
+            }
+        }
+        token = token.toUpperCase().replace('-', '_').replace(' ', '_');
+        token = token.replaceAll("[^A-Z0-9_]", "_");
+        token = token.replaceAll("_+", "_");
+        token = token.replaceAll("^_+", "");
+        token = token.replaceAll("_+$", "");
+        return token.isEmpty() ? null : token;
     }
 
     private StrategyDirective askOllama(int player, GameState gs, StateSnapshot snapshot, int consultInterval) {
@@ -1155,11 +1542,31 @@ public class FortressBotAgent extends AbstractionLayerAI {
                 s.enemyUnits.add(u);
                 if (u.getType() == workerType) {
                     s.enemyWorkerCount++;
+                    UnitActionAssignment enemyWorkerAssignment = gs.getActionAssignment(u);
+                    if (enemyWorkerAssignment != null
+                            && enemyWorkerAssignment.action != null
+                            && enemyWorkerAssignment.action.getType() == UnitAction.TYPE_PRODUCE
+                            && enemyWorkerAssignment.action.getUnitType() == barracksType) {
+                        s.enemyWorkerBuildingBarracks = true;
+                    }
                 } else if (u.getType() == baseType) {
                     s.enemyBaseCount++;
                     s.enemyBases.add(u);
                 } else if (u.getType() == barracksType) {
                     s.enemyBarracksCount++;
+                    UnitActionAssignment enemyBarracksAssignment = gs.getActionAssignment(u);
+                    if (enemyBarracksAssignment != null
+                            && enemyBarracksAssignment.action != null
+                            && enemyBarracksAssignment.action.getType() == UnitAction.TYPE_PRODUCE) {
+                        UnitType training = enemyBarracksAssignment.action.getUnitType();
+                        if (training == lightType) {
+                            s.enemyBarracksTrainingLight = true;
+                        } else if (training == heavyType) {
+                            s.enemyBarracksTrainingHeavy = true;
+                        } else if (training == rangedType) {
+                            s.enemyBarracksTrainingRanged = true;
+                        }
+                    }
                 }
                 if (u.getType() == lightType) {
                     s.enemyLightCount++;
@@ -1313,6 +1720,22 @@ public class FortressBotAgent extends AbstractionLayerAI {
                 && snapshot.enemyWorkerCount >= 4
                 && snapshot.enemyClosestWorkerToBase <= THREAT_RADIUS + 2;
         return immediateThreat || earlyPressure || lowCombatPressure || proactiveSmallMapScout;
+    }
+
+    private boolean shouldActivateLargeMapLightRushDefense(GameState gs, StateSnapshot snapshot) {
+        if (snapshot == null || !isLargeMap(snapshot) || snapshot.myBaseCount <= 0) {
+            return false;
+        }
+        if (gs.getTime() > 1200) {
+            return false;
+        }
+        boolean enemyLightPressure = snapshot.enemyLightCount >= 1
+                && snapshot.enemyHeavyCount == 0
+                && snapshot.enemyRangedCount == 0
+                && snapshot.enemyClosestToBase <= 10;
+        boolean underSkirmisherInferiority = snapshot.enemyLightCount >= snapshot.myCombatCount + 1
+                && snapshot.enemyClosestToBase <= 12;
+        return enemyLightPressure || underSkirmisherInferiority;
     }
 
     private Unit chooseWorkerRushDefenderTarget(Unit defender, StateSnapshot snapshot) {
