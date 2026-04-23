@@ -3,7 +3,7 @@ package ai.mcts.submissions.penguin_bot;
 import ai.abstraction.HeavyRush;
 import ai.abstraction.RangedRush;
 import ai.abstraction.WorkerDefense;
-import ai.abstraction.WorkerRush;
+import ai.abstraction.WorkerRushPlusPlus;
 import ai.core.AI;
 import ai.core.ParameterSpecification;
 import ai.evaluation.SimpleSqrtEvaluationFunction3;
@@ -42,7 +42,7 @@ import util.Pair;
  *
  * <p>1) Opening book (deterministic macro build + WorkerDefense fill-ins)
  * <p>2) Deterministic strategic assessment (force ATTACK/DEFEND on clear triggers)
- * <p>3) Optional LLM strategy advice (stance + preferred unit + optional worker-rush toggle)
+ * <p>3) Optional LLM strategy advice (stance + preferred unit)
  * <p>4) Stance-conditioned MCTS biasing and action selection
  * <p>5) Endgame finish mode to force cleanup and avoid stalling
  * <p>6) Runtime fallbacks to scripted policies if search fails
@@ -66,37 +66,49 @@ public class MCTSAgent extends NaiveMCTS {
     private static final int OPENING_WORKER_TARGET_DEFAULT = 4;
     private static final int OPENING_RANGED_TARGET_DEFAULT = 1;
     private static final int OPENING_HEAVY_TARGET_DEFAULT = 1;
+    private static final String WORKER_NAME = "Worker";
+    private static final String BASE_NAME = "Base";
+    private static final String BARRACKS_NAME = "Barracks";
+    private static final String RANGED_NAME = "Ranged";
+    private static final String HEAVY_NAME = "Heavy";
 
     private static final int RUSH_ALERT_RADIUS_DEFAULT = 7;
     private static final int BASE_DEFENSE_RADIUS_DEFAULT = 4;
-    private static final int LLM_INTERVAL = getEnvInt("MCTS_LLM_INTERVAL", 60);
+    private static final int LARGE_MAP_AREA_THRESHOLD = 400;
+    private static final int HEAVY_DEFENSE_TARGET = 2;
+    private static final int LLM_INTERVAL = getEnvInt("MCTS_LLM_INTERVAL", 450);
     private static final boolean LLM_ENABLED =
             Boolean.parseBoolean(System.getenv().getOrDefault("MCTS_ENABLE_LLM", "true"));
     private static final int OLLAMA_CONNECT_TIMEOUT_MS =
-            getEnvInt("OLLAMA_CONNECT_TIMEOUT_MS", 40);
+            getEnvInt("OLLAMA_CONNECT_TIMEOUT_MS", 700);
     private static final int OLLAMA_READ_TIMEOUT_MS =
-            getEnvInt("OLLAMA_READ_TIMEOUT_MS", 80);
-    private static final int LLM_PREFERRED_UNIT_HOLD_TICKS =
-            getEnvInt("MCTS_LLM_PREFERRED_UNIT_HOLD_TICKS", 180);
+            getEnvInt("OLLAMA_READ_TIMEOUT_MS", 700);
+    private static final int LLM_FAILURE_COOLDOWN_BASE_TICKS =
+            getEnvInt("MCTS_LLM_FAILURE_COOLDOWN_BASE", 150);
+    private static final int LLM_FAILURE_COOLDOWN_MAX_TICKS =
+            getEnvInt("MCTS_LLM_FAILURE_COOLDOWN_MAX", 900);
     private static final String OLLAMA_HOST =
             System.getenv().getOrDefault("OLLAMA_HOST", "http://localhost:11434");
     private static final String MODEL =
-            System.getenv().getOrDefault("OLLAMA_MODEL", "llama3.1:8b");
+            System.getenv().getOrDefault("OLLAMA_MODEL", "gemma4");
     private static final String FALLBACK_MODELS_CSV =
             System.getenv().getOrDefault("OLLAMA_FALLBACK_MODELS", "llama3.2:3b,mistral:7b,qwen2.5:7b");
 
     private final UnitTypeTable utt;
+    private final UnitType workerType;
+    private final UnitType baseType;
+    private final UnitType barracksType;
+    private final UnitType rangedType;
+    private final UnitType heavyType;
     private final HeavyRush heavyRushPolicy;
     private final RangedRush rangedRushPolicy;
     private final WorkerDefense workerDefensePolicy;
-    private final WorkerRush workerRushPolicy;
+    private final WorkerRushPlusPlus workerRushPolicy;
 
     private int lastConsultTick = -9999;
     private int activePlayer = 0;
     private boolean openingComplete = false;
     private boolean finishMode = false;
-    private boolean llmWorkerRushMode = false;
-    private boolean llmTinyMapPlanResolved = false;
 
     private Stance currentStance = Stance.DEFEND;
     private String preferredUnit = "RANGED";
@@ -104,11 +116,58 @@ public class MCTSAgent extends NaiveMCTS {
     private Set<String> preferredActions = new HashSet<>();
     private String resolvedOllamaModel = null;
     private String llmPreferredUnitOverride = null;
-    private int llmPreferredUnitOverrideUntil = -1;
+    private boolean llmRangedAttackHeavyDefenseMode = false;
     private volatile boolean llmRequestInFlight = false;
     private volatile String pendingLlmResponse = null;
     private volatile int pendingLlmResponseTick = -1;
+    private int llmFailureStreak = 0;
+    private int llmCooldownUntilTick = -1;
     private int llmRequestGeneration = 0;
+
+    /**
+     * One-pass per-tick state summary used across opening, deterministic logic, and LLM prompting.
+     */
+    private static final class Snapshot {
+        final GameState gs;
+        final int player;
+        final int enemy;
+        final int time;
+        final int mapW;
+        final int mapH;
+        final int mapArea;
+        final int myResources;
+        final int enemyResources;
+
+        final List<Unit> myBases = new ArrayList<>();
+        final List<Unit> myBarracksUnits = new ArrayList<>();
+        final List<Unit> myWorkersUnits = new ArrayList<>();
+        final List<Unit> enemyBases = new ArrayList<>();
+
+        int myWorkers = 0;
+        int myRanged = 0;
+        int myHeavy = 0;
+        int myBarracks = 0;
+        int myCombat = 0;
+
+        int enemyWorkers = 0;
+        int enemyRanged = 0;
+        int enemyHeavy = 0;
+        int enemyBarracks = 0;
+        int enemyCombat = 0;
+        int enemyBaseCount = 0;
+
+        Snapshot(GameState gs, int player) {
+            this.gs = gs;
+            this.player = player;
+            this.enemy = 1 - player;
+            this.time = gs.getTime();
+            this.mapW = gs.getPhysicalGameState().getWidth();
+            this.mapH = gs.getPhysicalGameState().getHeight();
+            this.mapArea = mapW * mapH;
+            this.myResources = gs.getPlayer(player).getResources();
+            this.enemyResources = gs.getPlayer(enemy).getResources();
+        }
+    }
 
     public MCTSAgent(UnitTypeTable utt) {
         super(120, -1, 105, 10,
@@ -117,10 +176,15 @@ public class MCTSAgent extends NaiveMCTS {
               new SimpleSqrtEvaluationFunction3(),
               true);
         this.utt = utt;
+        this.workerType = utt.getUnitType(WORKER_NAME);
+        this.baseType = utt.getUnitType(BASE_NAME);
+        this.barracksType = utt.getUnitType(BARRACKS_NAME);
+        this.rangedType = utt.getUnitType(RANGED_NAME);
+        this.heavyType = utt.getUnitType(HEAVY_NAME);
         this.heavyRushPolicy = new HeavyRush(utt);
         this.rangedRushPolicy = new RangedRush(utt);
         this.workerDefensePolicy = new WorkerDefense(utt);
-        this.workerRushPolicy = new WorkerRush(utt);
+        this.workerRushPolicy = new WorkerRushPlusPlus(utt);
         preferredActions.add("PRODUCE_HEAVY");
         preferredActions.add("PRODUCE_RANGED");
         preferredActions.add("DEFEND_BASE");
@@ -131,7 +195,7 @@ public class MCTSAgent extends NaiveMCTS {
      *
      * <p>Order matters:
      *
-     * <p>- tiny-map LLM worker-rush policy check
+     * <p>- tiny-map worker-rush shortcut
      * <p>- opening book (if not completed)
      * <p>- deterministic stance update
      * <p>- periodic LLM consult (unless finish mode is active)
@@ -145,17 +209,10 @@ public class MCTSAgent extends NaiveMCTS {
         activePlayer = player;
         applyPendingOllamaResponse();
 
-        if (isEightByEightMap(gs) && !llmTinyMapPlanResolved) {
-            scheduleOllamaConsult(player, gs, true);
-            llmTinyMapPlanResolved = true;
-        }
-        if (!isEightByEightMap(gs)) {
-            llmWorkerRushMode = false;
-        }
-        if (llmWorkerRushMode) {
+        if (isEightByEightMap(gs)) {
             openingComplete = true;
             currentStance = Stance.ATTACK;
-            preferredReason = "LLM tiny-map policy: worker rush";
+            preferredReason = "Small map default: worker rush++";
             try {
                 return workerRushPolicy.getAction(player, gs);
             } catch (RuntimeException ex) {
@@ -163,22 +220,25 @@ public class MCTSAgent extends NaiveMCTS {
             }
         }
 
-        if (!openingComplete && (gs.getTime() < openingEndTick(gs) || !openingGoalsMet(player, gs))) {
-            return openingAction(player, gs);
+        Snapshot snapshot = buildSnapshot(player, gs);
+
+        if (!openingComplete && (snapshot.time < openingEndTick(snapshot.mapArea) || !openingGoalsMet(snapshot))) {
+            return openingAction(snapshot);
         }
         openingComplete = true;
 
-        applyDeterministicStrategy(player, gs);
+        boolean underAttack = isGettingRushed(snapshot);
+        applyDeterministicStrategy(snapshot, underAttack);
 
         if (!finishMode) {
-            scheduleOllamaConsult(player, gs, false);
+            scheduleOllamaConsult(snapshot, underAttack, false);
         }
 
         applyPendingOllamaResponse();
-        applyDeterministicStrategy(player, gs);
+        applyDeterministicStrategy(snapshot, underAttack);
         applyStanceBiases();
         if (finishMode) {
-            PlayerAction finisher = getFinishModeAction(player, gs);
+            PlayerAction finisher = getFinishModeAction(snapshot);
             if (finisher != null && !finisher.isEmpty()) {
                 return finisher;
             }
@@ -188,7 +248,7 @@ public class MCTSAgent extends NaiveMCTS {
         } catch (RuntimeException ex) {
             try {
                 if (finishMode) {
-                    PlayerAction finisher = getFinishModeAction(player, gs);
+                    PlayerAction finisher = getFinishModeAction(snapshot);
                     if (finisher != null) return finisher;
                 }
                 if (currentStance == Stance.ATTACK) {
@@ -203,6 +263,43 @@ public class MCTSAgent extends NaiveMCTS {
         }
     }
 
+    private Snapshot buildSnapshot(int player, GameState gs) {
+        Snapshot snapshot = new Snapshot(gs, player);
+        for (Unit unit : gs.getPhysicalGameState().getUnits()) {
+            if (unit.getPlayer() == snapshot.player) {
+                if (unit.getType() == baseType) {
+                    snapshot.myBases.add(unit);
+                } else if (unit.getType() == barracksType) {
+                    snapshot.myBarracks++;
+                    snapshot.myBarracksUnits.add(unit);
+                } else if (unit.getType() == workerType) {
+                    snapshot.myWorkers++;
+                    snapshot.myWorkersUnits.add(unit);
+                } else if (unit.getType() == rangedType) {
+                    snapshot.myRanged++;
+                } else if (unit.getType() == heavyType) {
+                    snapshot.myHeavy++;
+                }
+                if (isCombatType(unit.getType())) snapshot.myCombat++;
+            } else if (unit.getPlayer() == snapshot.enemy) {
+                if (unit.getType() == baseType) {
+                    snapshot.enemyBaseCount++;
+                    snapshot.enemyBases.add(unit);
+                } else if (unit.getType() == barracksType) {
+                    snapshot.enemyBarracks++;
+                } else if (unit.getType() == workerType) {
+                    snapshot.enemyWorkers++;
+                } else if (unit.getType() == rangedType) {
+                    snapshot.enemyRanged++;
+                } else if (unit.getType() == heavyType) {
+                    snapshot.enemyHeavy++;
+                }
+                if (isCombatType(unit.getType())) snapshot.enemyCombat++;
+            }
+        }
+        return snapshot;
+    }
+
     /**
      * Deterministic opening book.
      *
@@ -213,35 +310,18 @@ public class MCTSAgent extends NaiveMCTS {
      * <p>- reach economy + seed military thresholds
      * <p>- borrow WorkerDefense for unassigned units while preventing production conflicts
      */
-    private PlayerAction openingAction(int player, GameState gs) throws Exception {
+    private PlayerAction openingAction(Snapshot snapshot) throws Exception {
+        int player = snapshot.player;
+        GameState gs = snapshot.gs;
         currentStance = Stance.DEFEND;
         applyStanceBiases();
 
-        UnitType workerType = utt.getUnitType("Worker");
-        UnitType barracksType = utt.getUnitType("Barracks");
-        UnitType rangedType = utt.getUnitType("Ranged");
-        UnitType heavyType = utt.getUnitType("Heavy");
-
-        List<Unit> myBases = new ArrayList<>();
-        List<Unit> myBarracks = new ArrayList<>();
-        List<Unit> myWorkers = new ArrayList<>();
-        int workerCount = 0;
-        int rangedCount = 0;
-        int heavyCount = 0;
-
-        for (Unit u : gs.getPhysicalGameState().getUnits()) {
-            if (u.getPlayer() != player) continue;
-            if ("Base".equals(u.getType().name)) myBases.add(u);
-            else if ("Barracks".equals(u.getType().name)) myBarracks.add(u);
-            else if ("Worker".equals(u.getType().name)) {
-                myWorkers.add(u);
-                workerCount++;
-            } else if ("Ranged".equals(u.getType().name)) {
-                rangedCount++;
-            } else if ("Heavy".equals(u.getType().name)) {
-                heavyCount++;
-            }
-        }
+        List<Unit> myBases = snapshot.myBases;
+        List<Unit> myBarracks = snapshot.myBarracksUnits;
+        List<Unit> myWorkers = snapshot.myWorkersUnits;
+        int workerCount = snapshot.myWorkers;
+        int rangedCount = snapshot.myRanged;
+        int heavyCount = snapshot.myHeavy;
 
         PlayerAction defenseAction = workerDefensePolicy.getAction(player, gs);
         Map<Long, Pair<Unit, UnitAction>> defenseMap = toActionMap(defenseAction);
@@ -264,7 +344,7 @@ public class MCTSAgent extends NaiveMCTS {
         }
 
         boolean barracksReady = !myBarracks.isEmpty();
-        boolean barracksInProgress = hasBarracksInProgress(player, gs, barracksType);
+        boolean barracksInProgress = hasBarracksInProgress(player, gs);
         boolean baseIsProducing = hasBaseProduceInProgress(player, gs);
         if (!barracksReady && !barracksInProgress && !baseIsProducing) {
             Unit bestWorker = null;
@@ -284,7 +364,6 @@ public class MCTSAgent extends NaiveMCTS {
             }
             if (bestWorker != null && addIfConsistent(out, bestWorker, bestBuild, gs)) {
                 assigned.add(bestWorker.getID());
-                barracksInProgress = true;
             }
         }
 
@@ -351,7 +430,7 @@ public class MCTSAgent extends NaiveMCTS {
             }
         }
 
-        if (openingGoalsMet(player, gs)) openingComplete = true;
+        if (openingGoalsMet(snapshot)) openingComplete = true;
         return out;
     }
 
@@ -361,29 +440,29 @@ public class MCTSAgent extends NaiveMCTS {
      * <p>This runs before and after LLM consultation so deterministic safety constraints
      * remain authoritative when game-state triggers are decisive.
      */
-    private void applyDeterministicStrategy(int player, GameState gs) {
-        int enemy = 1 - player;
-        int myWorkers = countUnits(player, gs, "Worker");
-        int enemyWorkers = countUnits(enemy, gs, "Worker");
-        int myRanged = countUnits(player, gs, "Ranged");
-        int enemyRanged = countUnits(enemy, gs, "Ranged");
-        int myHeavy = countUnits(player, gs, "Heavy");
-        int enemyHeavy = countUnits(enemy, gs, "Heavy");
-        int myBarracks = countUnits(player, gs, "Barracks");
-        int enemyBarracks = countUnits(enemy, gs, "Barracks");
-        int enemyBases = countUnits(enemy, gs, "Base");
-        int myCombat = countMyCombatUnits(player, gs);
-        int enemyCombat = countMyCombatUnits(enemy, gs);
+    private void applyDeterministicStrategy(Snapshot snapshot, boolean underAttack) {
+        int myWorkers = snapshot.myWorkers;
+        int enemyWorkers = snapshot.enemyWorkers;
+        int myRanged = snapshot.myRanged;
+        int enemyRanged = snapshot.enemyRanged;
+        int myHeavy = snapshot.myHeavy;
+        int enemyHeavy = snapshot.enemyHeavy;
+        int myBarracks = snapshot.myBarracks;
+        int enemyBarracks = snapshot.enemyBarracks;
+        int enemyBases = snapshot.enemyBaseCount;
+        int myCombat = snapshot.myCombat;
+        int enemyCombat = snapshot.enemyCombat;
 
-        updateFinishMode(player, gs, myCombat, enemyCombat, myWorkers, enemyWorkers, enemyBarracks, enemyBases);
+        updateFinishMode(snapshot.player, snapshot.gs,
+                myCombat, enemyCombat, myWorkers, enemyWorkers, enemyBarracks, enemyBases);
         if (finishMode) {
             currentStance = Stance.ATTACK;
             preferredReason = "Finish mode: force aggressive cleanup after decisive lead";
         }
 
-        boolean underAttack = isGettingRushed(player, gs);
         boolean enemyCollapsed = enemyBarracks == 0 && enemyCombat == 0 && enemyWorkers <= 1;
-        boolean strongCombatLead = myCombat >= 4 && myCombat >= enemyCombat + 2;
+        int leadThreshold = snapshot.mapArea <= 256 ? 3 : 4;
+        boolean strongCombatLead = myCombat >= leadThreshold && myCombat >= enemyCombat + 2;
         boolean structuralLead = myBarracks > 0 && enemyBarracks == 0 && myCombat >= Math.max(2, enemyCombat + 1);
         boolean economySnowball = myWorkers >= enemyWorkers + 6 && myCombat >= enemyCombat;
         boolean forceAttack = enemyCollapsed || strongCombatLead || structuralLead || economySnowball;
@@ -397,6 +476,13 @@ public class MCTSAgent extends NaiveMCTS {
             preferredReason = "Deterministic defend trigger while under pressure";
         }
 
+        if (llmRangedAttackHeavyDefenseMode
+                && snapshot.mapArea >= LARGE_MAP_AREA_THRESHOLD
+                && !forceDefend) {
+            currentStance = Stance.ATTACK;
+            preferredReason = "LLM large-map split mode: ranged pressure with heavy base anchors";
+        }
+
         String deterministicUnit;
         if (enemyRanged > enemyHeavy + 1) {
             deterministicUnit = "HEAVY";
@@ -406,12 +492,14 @@ public class MCTSAgent extends NaiveMCTS {
             deterministicUnit = myRanged <= myHeavy ? "RANGED" : "HEAVY";
         }
 
-        if (isLlmPreferredUnitActive(gs.getTime())) {
+        if (isLlmPreferredUnitActive()) {
             preferredUnit = llmPreferredUnitOverride;
         } else {
             llmPreferredUnitOverride = null;
-            llmPreferredUnitOverrideUntil = -1;
             preferredUnit = deterministicUnit;
+        }
+        if (llmRangedAttackHeavyDefenseMode && snapshot.mapArea >= LARGE_MAP_AREA_THRESHOLD) {
+            preferredUnit = "RANGED";
         }
     }
 
@@ -446,9 +534,11 @@ public class MCTSAgent extends NaiveMCTS {
     /**
      * Returns a direct scripted cleanup policy used during finish mode.
      */
-    private PlayerAction getFinishModeAction(int player, GameState gs) {
+    private PlayerAction getFinishModeAction(Snapshot snapshot) {
+        int player = snapshot.player;
+        GameState gs = snapshot.gs;
         try {
-            if (countMyCombatUnits(player, gs) > 0) {
+            if (snapshot.myCombat > 0) {
                 return "HEAVY".equals(preferredUnit)
                         ? heavyRushPolicy.getAction(player, gs)
                         : rangedRushPolicy.getAction(player, gs);
@@ -469,7 +559,7 @@ public class MCTSAgent extends NaiveMCTS {
         return null;
     }
 
-    private boolean hasBarracksInProgress(int player, GameState gs, UnitType barracksType) {
+    private boolean hasBarracksInProgress(int player, GameState gs) {
         for (Unit u : gs.getPhysicalGameState().getUnits()) {
             if (u.getPlayer() == player && u.getType() == barracksType) return true;
         }
@@ -487,44 +577,56 @@ public class MCTSAgent extends NaiveMCTS {
         for (UnitActionAssignment uaa : gs.getUnitActions().values()) {
             if (uaa == null || uaa.unit == null || uaa.action == null) continue;
             if (uaa.unit.getPlayer() != player) continue;
-            if (!"Base".equals(uaa.unit.getType().name)) continue;
+            if (uaa.unit.getType() != baseType) continue;
             if (uaa.action.getType() == UnitAction.TYPE_PRODUCE) return true;
         }
         return false;
     }
 
-    private void scheduleOllamaConsult(int player, GameState gs, boolean force) {
+    private void scheduleOllamaConsult(Snapshot snapshot, boolean underAttack, boolean force) {
         if (!LLM_ENABLED || finishMode) return;
-        if (gs == null) return;
 
-        int consultInterval = isGettingRushed(player, gs) ? Math.max(10, LLM_INTERVAL / 4) : LLM_INTERVAL;
-        if (!force && gs.getTime() - lastConsultTick < consultInterval) return;
-
-        final int requestTick = gs.getTime();
-        final String prompt = buildPrompt(player, gs);
+        final int requestTick = snapshot.time;
+        int consultInterval = underAttack ? Math.max(10, LLM_INTERVAL / 4) : LLM_INTERVAL;
         final int generation;
         synchronized (this) {
+            if (!force && requestTick < llmCooldownUntilTick) return;
+            if (!force && requestTick - lastConsultTick < consultInterval) return;
             if (llmRequestInFlight) return;
             llmRequestInFlight = true;
             generation = llmRequestGeneration;
             lastConsultTick = requestTick;
         }
 
-        Thread worker = new Thread(() -> {
-            try {
-                String response = callOllama(prompt);
-                synchronized (MCTSAgent.this) {
-                    if (llmRequestGeneration == generation) {
-                        pendingLlmResponse = response;
-                        pendingLlmResponseTick = requestTick;
-                    }
+        final String prompt;
+        try {
+            prompt = buildPrompt(snapshot, underAttack);
+        } catch (RuntimeException ex) {
+            synchronized (this) {
+                if (llmRequestGeneration == generation) {
+                    recordLlmFailureLocked(requestTick);
+                    llmRequestInFlight = false;
                 }
+            }
+            return;
+        }
+
+        Thread worker = new Thread(() -> {
+            String response = null;
+            try {
+                response = callOllama(prompt);
             } catch (Exception ignored) {
             } finally {
                 synchronized (MCTSAgent.this) {
-                    if (llmRequestGeneration == generation) {
-                        llmRequestInFlight = false;
+                    if (llmRequestGeneration != generation) return;
+                    if (response != null && !response.trim().isEmpty()) {
+                        pendingLlmResponse = response;
+                        pendingLlmResponseTick = requestTick;
+                        recordLlmSuccessLocked();
+                    } else {
+                        recordLlmFailureLocked(requestTick);
                     }
+                    llmRequestInFlight = false;
                 }
             }
         }, "penguinbot-ollama");
@@ -542,7 +644,14 @@ public class MCTSAgent extends NaiveMCTS {
             pendingLlmResponse = null;
             pendingLlmResponseTick = -1;
         }
-        parseStrategyFromResponse(raw, tick >= 0 ? tick : 0);
+        boolean applied = parseStrategyFromResponse(raw);
+        synchronized (this) {
+            if (applied) {
+                recordLlmSuccessLocked();
+            } else {
+                recordLlmFailureLocked(Math.max(0, tick));
+            }
+        }
     }
 
     /**
@@ -550,83 +659,48 @@ public class MCTSAgent extends NaiveMCTS {
      *
      * <p>The LLM is asked for high-level control only (not low-level unit actions).
      */
-    private String buildPrompt(int player, GameState gs) {
-        int enemy = 1 - player;
-        int myCombat = 0;
-        int enemyCombat = 0;
-        int myHeavy = 0;
-        int myRanged = 0;
-        int myBarracks = 0;
-        int enemyHeavy = 0;
-        int enemyRanged = 0;
-        int enemyBarracks = 0;
-        int myWorkers = 0;
-        int enemyWorkers = 0;
-        int myResources = gs.getPlayer(player).getResources();
-        int enemyResources = gs.getPlayer(enemy).getResources();
-        UnitType baseType = utt.getUnitType("Base");
-        UnitType barracksType = utt.getUnitType("Barracks");
-        List<Unit> myBases = new ArrayList<>();
-        List<Unit> enemyBases = new ArrayList<>();
-
-        UnitType workerType = utt.getUnitType("Worker");
-        UnitType heavyType = utt.getUnitType("Heavy");
-        UnitType rangedType = utt.getUnitType("Ranged");
-
-        for (Unit u : gs.getPhysicalGameState().getUnits()) {
-            if (u.getPlayer() == player) {
-                if (u.getType() == heavyType) myHeavy++;
-                else if (u.getType() == rangedType) myRanged++;
-                else if (u.getType() == workerType) myWorkers++;
-                else if (u.getType() == baseType) myBases.add(u);
-                else if (u.getType() == barracksType) myBarracks++;
-                if (u.getType().canAttack && !u.getType().canHarvest) myCombat++;
-            } else if (u.getPlayer() == enemy) {
-                if (u.getType() == heavyType) enemyHeavy++;
-                else if (u.getType() == rangedType) enemyRanged++;
-                else if (u.getType() == workerType) enemyWorkers++;
-                else if (u.getType() == baseType) enemyBases.add(u);
-                else if (u.getType() == barracksType) enemyBarracks++;
-                if (u.getType().canAttack && !u.getType().canHarvest) enemyCombat++;
-            }
-        }
-
-        int myPressure = minMyCombatDistanceToEnemyBase(player, gs, enemyBases);
-        int enemyPressure = minEnemyCombatDistanceToMyBase(player, gs, myBases);
+    private String buildPrompt(Snapshot snapshot, boolean underAttack) {
+        int myPressure = minMyCombatDistanceToEnemyBase(snapshot.player, snapshot.gs, snapshot.enemyBases);
+        int enemyPressure = minEnemyCombatDistanceToMyBase(snapshot.player, snapshot.gs, snapshot.myBases);
         if (myPressure == Integer.MAX_VALUE) myPressure = 999;
         if (enemyPressure == Integer.MAX_VALUE) enemyPressure = 999;
-        boolean underAttack = isGettingRushed(player, gs);
 
-        int mapW = gs.getPhysicalGameState().getWidth();
-        int mapH = gs.getPhysicalGameState().getHeight();
-        String suggested = enemyRanged > enemyHeavy ? "HEAVY" : "RANGED";
+        boolean largeMap = snapshot.mapArea >= LARGE_MAP_AREA_THRESHOLD;
+        String suggested = largeMap
+                ? "RANGED"
+                : (snapshot.enemyRanged > snapshot.enemyHeavy ? "HEAVY" : "RANGED");
         String example = "{\"switch_required\":false,\"target_stance\":\"" + currentStance.name()
                 + "\",\"necessity\":\"NOT_NECESSARY\",\"preferred_unit\":\"" + suggested
-                + "\",\"reason\":\"hold stance and do not split behavior\"}";
+                + "\",\"ranged_attack_heavy_defense\":" + (largeMap ? "true" : "false")
+                + ",\"reason\":\"hold stance and do not split behavior\"}";
 
         StringBuilder sb = new StringBuilder();
         sb.append("You are a strict stance controller for an RTS bot. Return JSON only.\n");
         sb.append("The bot has binary stances only: DEFEND or ATTACK.\n");
-        sb.append("Never suggest partial/mixed behavior. Units cannot split between offense and defense.\n");
-        sb.append("If map is exactly 8x8, set worker_rush to true.\n");
+        sb.append("Do not suggest mixed behavior except when ranged_attack_heavy_defense=true.\n");
+        sb.append("If map is 16x16, prioritize a fast military build over long-term macro.\n");
+        sb.append("On larger maps (map_area >= 400), prefer preferred_unit=RANGED in most cases.\n");
+        sb.append("Only pick preferred_unit=HEAVY on larger maps when enemy ranged pressure clearly demands it.\n");
+        sb.append("On larger maps, prefer ranged_attack_heavy_defense=true: send ranged units forward to attack while keeping about 2 heavy units near own base on defense.\n");
         sb.append("Switch only when it is wholly necessary. If not wholly necessary, keep stance unchanged.\n");
         sb.append("State:\n");
-        sb.append("- map: ").append(mapW).append("x").append(mapH).append("\n");
-        sb.append("- time: ").append(gs.getTime()).append("\n");
+        sb.append("- map: ").append(snapshot.mapW).append("x").append(snapshot.mapH).append("\n");
+        sb.append("- map_area: ").append(snapshot.mapArea).append("\n");
+        sb.append("- time: ").append(snapshot.time).append("\n");
         sb.append("- current_stance: ").append(currentStance.name()).append("\n");
         sb.append("- under_attack: ").append(underAttack).append("\n");
-        sb.append("- my_resources: ").append(myResources).append("\n");
-        sb.append("- enemy_resources: ").append(enemyResources).append("\n");
-        sb.append("- my_workers: ").append(myWorkers).append("\n");
-        sb.append("- my_heavy: ").append(myHeavy).append("\n");
-        sb.append("- my_ranged: ").append(myRanged).append("\n");
-        sb.append("- my_barracks: ").append(myBarracks).append("\n");
-        sb.append("- my_combat_units: ").append(myCombat).append("\n");
-        sb.append("- enemy_workers: ").append(enemyWorkers).append("\n");
-        sb.append("- enemy_heavy: ").append(enemyHeavy).append("\n");
-        sb.append("- enemy_ranged: ").append(enemyRanged).append("\n");
-        sb.append("- enemy_barracks: ").append(enemyBarracks).append("\n");
-        sb.append("- enemy_combat_units: ").append(enemyCombat).append("\n");
+        sb.append("- my_resources: ").append(snapshot.myResources).append("\n");
+        sb.append("- enemy_resources: ").append(snapshot.enemyResources).append("\n");
+        sb.append("- my_workers: ").append(snapshot.myWorkers).append("\n");
+        sb.append("- my_heavy: ").append(snapshot.myHeavy).append("\n");
+        sb.append("- my_ranged: ").append(snapshot.myRanged).append("\n");
+        sb.append("- my_barracks: ").append(snapshot.myBarracks).append("\n");
+        sb.append("- my_combat_units: ").append(snapshot.myCombat).append("\n");
+        sb.append("- enemy_workers: ").append(snapshot.enemyWorkers).append("\n");
+        sb.append("- enemy_heavy: ").append(snapshot.enemyHeavy).append("\n");
+        sb.append("- enemy_ranged: ").append(snapshot.enemyRanged).append("\n");
+        sb.append("- enemy_barracks: ").append(snapshot.enemyBarracks).append("\n");
+        sb.append("- enemy_combat_units: ").append(snapshot.enemyCombat).append("\n");
         sb.append("- my_frontline_to_enemy_base: ").append(myPressure).append("\n");
         sb.append("- enemy_frontline_to_my_base: ").append(enemyPressure).append("\n");
         sb.append("JSON schema:\n");
@@ -634,7 +708,7 @@ public class MCTSAgent extends NaiveMCTS {
         sb.append("\"target_stance\":\"DEFEND|ATTACK\",");
         sb.append("\"necessity\":\"WHOLLY_NECESSARY|NOT_NECESSARY\",");
         sb.append("\"preferred_unit\":\"HEAVY|RANGED\",");
-        sb.append("\"worker_rush\":true|false,");
+        sb.append("\"ranged_attack_heavy_defense\":true|false,");
         sb.append("\"reason\":\"short explanation\",");
         sb.append("\"wholly_necessary\":true|false(optional)}\n");
         sb.append("Example: ").append(example);
@@ -666,6 +740,7 @@ public class MCTSAgent extends NaiveMCTS {
         body.addProperty("model", model);
         body.addProperty("prompt", prompt);
         body.addProperty("stream", false);
+        body.addProperty("format", "json");
 
         try (OutputStream os = conn.getOutputStream()) {
             os.write(body.toString().getBytes(StandardCharsets.UTF_8));
@@ -790,11 +865,10 @@ public class MCTSAgent extends NaiveMCTS {
      *
      * <p>- stance switch (only if marked wholly necessary)
      * <p>- preferred combat unit
-     * <p>- optional worker-rush mode for tiny maps
      */
-    private void parseStrategyFromResponse(String raw, int consultedAtTick) {
+    private boolean parseStrategyFromResponse(String raw) {
         JsonObject strategy = parseStrategyJson(raw);
-        if (strategy == null) return;
+        if (strategy == null) return false;
 
         Stance target = currentStance;
         if (strategy.has("target_stance")) {
@@ -824,17 +898,17 @@ public class MCTSAgent extends NaiveMCTS {
             String v = strategy.get("preferred_unit").getAsString().toUpperCase();
             if ("HEAVY".equals(v) || "RANGED".equals(v)) {
                 llmPreferredUnitOverride = v;
-                llmPreferredUnitOverrideUntil = consultedAtTick + LLM_PREFERRED_UNIT_HOLD_TICKS;
                 preferredUnit = v;
             }
         }
-        if (strategy.has("reason")) preferredReason = strategy.get("reason").getAsString();
-        if (strategy.has("worker_rush")) {
-            llmWorkerRushMode = strategy.get("worker_rush").getAsBoolean();
-        } else if (strategy.has("strategy")) {
-            String v = strategy.get("strategy").getAsString().toUpperCase();
-            llmWorkerRushMode = "WORKER_RUSH".equals(v);
+        if (strategy.has("ranged_attack_heavy_defense")) {
+            llmRangedAttackHeavyDefenseMode = strategy.get("ranged_attack_heavy_defense").getAsBoolean();
+        } else if (strategy.has("formation")) {
+            String v = strategy.get("formation").getAsString().toUpperCase();
+            llmRangedAttackHeavyDefenseMode = v.contains("RANGED_ATTACK_HEAVY_DEFENSE");
         }
+        if (strategy.has("reason")) preferredReason = strategy.get("reason").getAsString();
+        return true;
     }
 
     private JsonObject parseStrategyJson(String raw) {
@@ -938,7 +1012,8 @@ public class MCTSAgent extends NaiveMCTS {
         initial_epsilon_0 = 0.58f;
         initial_epsilon_l = 0.28f;
         initial_epsilon_g = 0.0f;
-        playoutPolicy = "HEAVY".equals(preferredUnit) ? heavyRushPolicy : rangedRushPolicy;
+        playoutPolicy = isRangedAttackHeavyDefenseModeActive() ? rangedRushPolicy
+                : ("HEAVY".equals(preferredUnit) ? heavyRushPolicy : rangedRushPolicy);
         Collections.addAll(preferredActions,
                 "ATTACK_NEAR_BASE",
                 "ADVANCE",
@@ -946,6 +1021,9 @@ public class MCTSAgent extends NaiveMCTS {
                 "PRODUCE_HEAVY",
                 "PRODUCE_" + preferredUnit,
                 "PRODUCE_WORKER");
+        if (isRangedAttackHeavyDefenseModeActive()) {
+            preferredActions.add("DEFEND_BASE");
+        }
     }
 
     /**
@@ -985,6 +1063,9 @@ public class MCTSAgent extends NaiveMCTS {
     private int preferenceScore(PlayerAction pa) {
         if (pa == null || preferredActions.isEmpty()) return 0;
         int score = 0;
+        boolean rangedAttackHeavyDefense = isRangedAttackHeavyDefenseModeActive();
+        int myHeavy = rangedAttackHeavyDefense ? countUnits(activePlayer, gs_to_start_from, heavyType) : 0;
+        int myRanged = rangedAttackHeavyDefense ? countUnits(activePlayer, gs_to_start_from, rangedType) : 0;
 
         for (Pair<Unit, UnitAction> uaa : pa.getActions()) {
             Unit u = uaa.m_a;
@@ -1003,10 +1084,15 @@ public class MCTSAgent extends NaiveMCTS {
                 if (preferredActions.contains("BUILD_BARRACKS") && "BARRACKS".equals(produced)) score += 6;
                 if (preferredActions.contains("PRODUCE_" + preferredUnit) && produced.equals(preferredUnit)) score += 5;
                 if (currentStance == Stance.ATTACK) {
-                    int myRanged = countUnits(activePlayer, gs_to_start_from, "Ranged");
-                    int myHeavy = countUnits(activePlayer, gs_to_start_from, "Heavy");
                     if ("RANGED".equals(produced)) score += myRanged <= myHeavy ? 4 : 2;
                     if ("HEAVY".equals(produced)) score += myHeavy < myRanged ? 4 : 2;
+                }
+                if (rangedAttackHeavyDefense) {
+                    if ("RANGED".equals(produced)) score += 8;
+                    if ("HEAVY".equals(produced)) {
+                        score += myHeavy < HEAVY_DEFENSE_TARGET ? 4 : 0;
+                        if (myHeavy >= HEAVY_DEFENSE_TARGET + 1) score -= 3;
+                    }
                 }
             }
 
@@ -1019,6 +1105,18 @@ public class MCTSAgent extends NaiveMCTS {
             if (preferredActions.contains("DEFEND_BASE") && intent == Intent.DEFENSE) {
                 score += 2;
             }
+
+            if (rangedAttackHeavyDefense && u.getType() != null) {
+                if (u.getType() == rangedType) {
+                    if (intent == Intent.OFFENSE) score += 10;
+                    if (intent == Intent.DEFENSE) score -= 12;
+                } else if (u.getType() == heavyType) {
+                    if (intent == Intent.DEFENSE) score += 8;
+                    if (intent == Intent.OFFENSE && myHeavy <= HEAVY_DEFENSE_TARGET) score -= 8;
+                    if (intent == Intent.OFFENSE && myHeavy > HEAVY_DEFENSE_TARGET) score -= 3;
+                }
+            }
+
             if (currentStance == Stance.DEFEND) {
                 if (intent == Intent.DEFENSE) score += 3;
                 if (intent == Intent.OFFENSE) score -= 10;
@@ -1079,8 +1177,8 @@ public class MCTSAgent extends NaiveMCTS {
         if (t == UnitAction.TYPE_HARVEST || t == UnitAction.TYPE_RETURN) return Intent.ECONOMY;
         if (t == UnitAction.TYPE_PRODUCE) {
             if (action.getUnitType() != null) {
-                String produced = action.getUnitType().name;
-                if ("Worker".equals(produced) || "Barracks".equals(produced) || "Base".equals(produced)) {
+                UnitType produced = action.getUnitType();
+                if (produced == workerType || produced == barracksType || produced == baseType) {
                     return Intent.ECONOMY;
                 }
             }
@@ -1114,7 +1212,7 @@ public class MCTSAgent extends NaiveMCTS {
         int before = Integer.MAX_VALUE;
         int after = Integer.MAX_VALUE;
         for (Unit u : gs_to_start_from.getPhysicalGameState().getUnits()) {
-            if (u.getPlayer() == player && "Base".equals(u.getType().name)) {
+            if (u.getPlayer() == player && u.getType() == baseType) {
                 before = Math.min(before, Math.abs(unit.getX() - u.getX()) + Math.abs(unit.getY() - u.getY()));
                 after = Math.min(after, Math.abs(nx - u.getX()) + Math.abs(ny - u.getY()));
             }
@@ -1125,7 +1223,7 @@ public class MCTSAgent extends NaiveMCTS {
     private boolean isActionNearAnyOwnBase(UnitAction a, int player, int radius) {
         if (gs_to_start_from == null) return false;
         for (Unit u : gs_to_start_from.getPhysicalGameState().getUnits()) {
-            if (u.getPlayer() == player && "Base".equals(u.getType().name)) {
+            if (u.getPlayer() == player && u.getType() == baseType) {
                 int d = Math.abs(u.getX() - a.getLocationX()) + Math.abs(u.getY() - a.getLocationY());
                 if (d <= radius) return true;
             }
@@ -1165,41 +1263,39 @@ public class MCTSAgent extends NaiveMCTS {
         return best;
     }
 
-    private boolean isGettingRushed(int player, GameState gs) {
-        int rushAlertRadius = rushAlertRadius(gs);
-        List<Unit> myBases = new ArrayList<>();
-        int myCombat = 0;
+    private boolean isGettingRushed(Snapshot snapshot) {
+        int rushAlertRadius = rushAlertRadius(snapshot.gs);
         int enemyThreat = 0;
-        for (Unit u : gs.getPhysicalGameState().getUnits()) {
-            if (u.getPlayer() == player && "Base".equals(u.getType().name)) myBases.add(u);
-            if (u.getPlayer() == player && u.getType().canAttack && !u.getType().canHarvest) myCombat++;
-        }
-        for (Unit enemy : gs.getPhysicalGameState().getUnits()) {
-            if (enemy.getPlayer() < 0 || enemy.getPlayer() == player) continue;
-            boolean isThreat = enemy.getType().canAttack || "Worker".equals(enemy.getType().name);
+        for (Unit enemy : snapshot.gs.getPhysicalGameState().getUnits()) {
+            if (enemy.getPlayer() < 0 || enemy.getPlayer() == snapshot.player) continue;
+            boolean isThreat = enemy.getType().canAttack || enemy.getType() == workerType;
             if (!isThreat) continue;
-            int d = distanceToClosest(enemy, myBases);
+            int d = distanceToClosest(enemy, snapshot.myBases);
             if (d <= rushAlertRadius) enemyThreat++;
         }
-        return enemyThreat >= 2 || (enemyThreat > 0 && enemyThreat >= myCombat);
+        return enemyThreat >= 2 || (enemyThreat > 0 && enemyThreat >= snapshot.myCombat);
     }
 
     private int countMyCombatUnits(int player, GameState gs) {
         if (gs == null) return 0;
         int n = 0;
         for (Unit u : gs.getPhysicalGameState().getUnits()) {
-            if (u.getPlayer() == player && u.getType().canAttack && !u.getType().canHarvest) {
+            if (u.getPlayer() == player && isCombatType(u.getType())) {
                 n++;
             }
         }
         return n;
     }
 
-    private int countUnits(int player, GameState gs, String typeName) {
-        if (gs == null || typeName == null) return 0;
+    private boolean isCombatType(UnitType type) {
+        return type != null && type.canAttack && !type.canHarvest;
+    }
+
+    private int countUnits(int player, GameState gs, UnitType type) {
+        if (gs == null || type == null) return 0;
         int n = 0;
         for (Unit u : gs.getPhysicalGameState().getUnits()) {
-            if (u.getPlayer() == player && typeName.equals(u.getType().name)) n++;
+            if (u.getPlayer() == player && u.getType() == type) n++;
         }
         return n;
     }
@@ -1232,29 +1328,18 @@ public class MCTSAgent extends NaiveMCTS {
     /**
      * Opening completion condition.
      */
-    private boolean openingGoalsMet(int player, GameState gs) {
-        int workers = 0;
-        int ranged = 0;
-        int heavy = 0;
-        int barracks = 0;
-        for (Unit u : gs.getPhysicalGameState().getUnits()) {
-            if (u.getPlayer() != player) continue;
-            if ("Worker".equals(u.getType().name)) workers++;
-            if ("Ranged".equals(u.getType().name)) ranged++;
-            if ("Heavy".equals(u.getType().name)) heavy++;
-            if ("Barracks".equals(u.getType().name)) barracks++;
-        }
-        return workers >= openingWorkerTarget(gs)
-                && barracks >= 1
-                && ranged >= openingRangedTarget(gs)
-                && heavy >= openingHeavyTarget(gs);
+    private boolean openingGoalsMet(Snapshot snapshot) {
+        return snapshot.myWorkers >= openingWorkerTarget(snapshot.gs)
+                && snapshot.myBarracks >= 1
+                && snapshot.myRanged >= openingRangedTarget(snapshot.gs)
+                && snapshot.myHeavy >= openingHeavyTarget(snapshot.gs);
     }
 
     private int minDistanceToEnemyBase(int x, int y, int player) {
         if (gs_to_start_from == null) return 9999;
         int best = 9999;
         for (Unit u : gs_to_start_from.getPhysicalGameState().getUnits()) {
-            if (u.getPlayer() >= 0 && u.getPlayer() != player && "Base".equals(u.getType().name)) {
+            if (u.getPlayer() >= 0 && u.getPlayer() != player && u.getType() == baseType) {
                 int d = Math.abs(x - u.getX()) + Math.abs(y - u.getY());
                 best = Math.min(best, d);
             }
@@ -1313,10 +1398,9 @@ public class MCTSAgent extends NaiveMCTS {
         }
     }
 
-    private int openingEndTick(GameState gs) {
-        int area = mapArea(gs);
-        if (area <= 64) return 260;
-        if (area <= 144) return OPENING_END_TICK_DEFAULT;
+    private int openingEndTick(int mapArea) {
+        if (mapArea <= 64) return 260;
+        if (mapArea <= 256) return 300;
         return 460;
     }
 
@@ -1328,8 +1412,7 @@ public class MCTSAgent extends NaiveMCTS {
 
     private int openingWorkerTarget(GameState gs) {
         int area = mapArea(gs);
-        if (area <= 64) return 3;
-        if (area <= 144) return OPENING_WORKER_TARGET_DEFAULT;
+        if (area <= 256) return 3;
         return 5;
     }
 
@@ -1366,10 +1449,29 @@ public class MCTSAgent extends NaiveMCTS {
         return gs.getPhysicalGameState().getWidth() * gs.getPhysicalGameState().getHeight();
     }
 
-    private boolean isLlmPreferredUnitActive(int currentTick) {
+    private boolean isRangedAttackHeavyDefenseModeActive() {
+        return llmRangedAttackHeavyDefenseMode
+                && currentStance == Stance.ATTACK
+                && gs_to_start_from != null
+                && mapArea(gs_to_start_from) >= LARGE_MAP_AREA_THRESHOLD;
+    }
+
+    private void recordLlmSuccessLocked() {
+        llmFailureStreak = 0;
+        llmCooldownUntilTick = -1;
+    }
+
+    private void recordLlmFailureLocked(int tick) {
+        llmFailureStreak = Math.min(llmFailureStreak + 1, 8);
+        int multiplier = Math.min(4, llmFailureStreak);
+        int cooldown = LLM_FAILURE_COOLDOWN_BASE_TICKS * multiplier;
+        cooldown = Math.max(10, Math.min(LLM_FAILURE_COOLDOWN_MAX_TICKS, cooldown));
+        llmCooldownUntilTick = Math.max(llmCooldownUntilTick, tick + cooldown);
+    }
+
+    private boolean isLlmPreferredUnitActive() {
         return llmPreferredUnitOverride != null
-                && !llmPreferredUnitOverride.isEmpty()
-                && currentTick <= llmPreferredUnitOverrideUntil;
+                && !llmPreferredUnitOverride.isEmpty();
     }
 
     @Override
@@ -1379,8 +1481,6 @@ public class MCTSAgent extends NaiveMCTS {
         activePlayer = 0;
         openingComplete = false;
         finishMode = false;
-        llmWorkerRushMode = false;
-        llmTinyMapPlanResolved = false;
         currentStance = Stance.DEFEND;
         preferredUnit = "RANGED";
         preferredReason = "Defensive opening";
@@ -1389,12 +1489,14 @@ public class MCTSAgent extends NaiveMCTS {
         preferredActions.add("PRODUCE_RANGED");
         preferredActions.add("DEFEND_BASE");
         llmPreferredUnitOverride = null;
-        llmPreferredUnitOverrideUntil = -1;
+        llmRangedAttackHeavyDefenseMode = false;
         synchronized (this) {
             llmRequestGeneration++;
             llmRequestInFlight = false;
             pendingLlmResponse = null;
             pendingLlmResponseTick = -1;
+            llmFailureStreak = 0;
+            llmCooldownUntilTick = -1;
         }
     }
 
@@ -1421,12 +1523,13 @@ public class MCTSAgent extends NaiveMCTS {
         cloned.activePlayer = activePlayer;
         cloned.openingComplete = openingComplete;
         cloned.finishMode = finishMode;
-        cloned.llmWorkerRushMode = llmWorkerRushMode;
-        cloned.llmTinyMapPlanResolved = llmTinyMapPlanResolved;
         cloned.resolvedOllamaModel = resolvedOllamaModel;
         cloned.llmPreferredUnitOverride = llmPreferredUnitOverride;
-        cloned.llmPreferredUnitOverrideUntil = llmPreferredUnitOverrideUntil;
+        cloned.llmRangedAttackHeavyDefenseMode = llmRangedAttackHeavyDefenseMode;
         cloned.lastConsultTick = lastConsultTick;
+        cloned.llmFailureStreak = llmFailureStreak;
+        cloned.llmCooldownUntilTick = llmCooldownUntilTick;
+        cloned.llmRequestGeneration = llmRequestGeneration;
         cloned.applyStanceBiases();
         return cloned;
     }
