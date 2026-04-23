@@ -33,6 +33,8 @@ GAME_TIMEOUT = 900  # 15 minutes
 MAPS = [
     {"path": "maps/8x8/basesWorkers8x8.xml", "label": "8x8", "max_cycles": 1500},
     {"path": "maps/16x16/basesWorkers16x16.xml", "label": "16x16", "max_cycles": 3000},
+    {"path": "maps/basesWorkers32x32A.xml", "label": "32x32", "max_cycles": 5000},
+    {"path": "maps/GardenOfWar64x64.xml", "label": "64x64", "max_cycles": 8000},
 ]
 
 # Reference AI anchors - identical to benchmark_arena.py

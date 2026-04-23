@@ -5,5 +5,5 @@
   "agent_file": "JMurrAgent.java",
   "model_provider": "ollama",
   "model_name": "llama3.1:8b",
-  "description": "Start by prompting an LLM to mirror the opponents strategy for a fixed number of ticks. Then, switch to HybridLLMRush for the remainder of the game."
+  "description": "Start by using light rush. Then after a set number of turns, prompt an LLM to determine the opponent strategy. Then choose a counter strategy from a predetermined table."
 }

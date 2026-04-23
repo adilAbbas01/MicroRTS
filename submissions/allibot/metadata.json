@@ -5,5 +5,6 @@
   "agent_file": "alli.java",
   "model_provider": "ollama",
   "model_name": "qwen3:14b",
-  "description": "Search+LLM (LLMInformedMCTS defaulting to qwen3:14b) with Alli heuristics as fallback."
+  "description": "Mayari-derived hybrid bot with rush-defense rules, small-map WorkerRush delegation, and qwen3:14b-guided advisor/search logic."
+
 }
