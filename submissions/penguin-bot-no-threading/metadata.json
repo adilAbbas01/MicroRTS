@@ -1,6 +1,6 @@
 {
-  "team_name": "penguin-bot",
-  "display_name": "PenguinBot",
+  "team_name": "penguin-bot-no-threading",
+  "display_name": "PenguinBot (no-thread)",
   "agent_class": "MCTSAgent",
   "agent_file": "MCTSAgent.java",
   "model_provider": "ollama",

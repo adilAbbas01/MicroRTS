@@ -1,4 +1,4 @@
-package ai.mcts.submissions.penguin_bot;
+package ai.mcts.submissions.penguin_bot_no_threading;
 
 import ai.abstraction.HeavyRush;
 import ai.abstraction.RangedRush;
