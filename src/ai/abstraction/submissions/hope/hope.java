@@ -8,6 +8,7 @@ import ai.abstraction.RangedRush;
 import ai.abstraction.EconomyRush;
 import ai.abstraction.BoomEconomy;
 import ai.abstraction.TurtleDefense;
+import ai.abstraction.WorkerRushPlusPlus;
 
 import ai.abstraction.pathfinding.AStarPathFinding;
 import ai.core.AI;
@@ -63,7 +64,7 @@ public class hope extends AbstractionLayerAI {
     }
 
     // Strategy instances (composition pattern)
-    private WorkerRush workerRushAI;
+    private WorkerRushPlusPlus workerRushAI;
     private LightRush lightRushAI;
     private HeavyRush heavyRushAI;
     private RangedRush rangedRushAI;
@@ -126,7 +127,7 @@ public class hope extends AbstractionLayerAI {
     public void reset(UnitTypeTable a_utt) {
         utt = a_utt;
         // Initialize all strategy instances
-        workerRushAI = new WorkerRush(a_utt, pf);
+        workerRushAI = new WorkerRushPlusPlus(a_utt, pf);
         lightRushAI = new LightRush(a_utt, pf);
         heavyRushAI = new HeavyRush(a_utt, pf);
         rangedRushAI = new RangedRush(a_utt, pf);
@@ -202,6 +203,7 @@ public class hope extends AbstractionLayerAI {
         // Reset the new strategy's action queue to avoid conflicts
         getCurrentStrategyAI().reset();
     }
+    
 
     /**
      * Consult the LLM to decide which strategy to use
@@ -234,6 +236,7 @@ public class hope extends AbstractionLayerAI {
         for (Unit u : pgs.getUnits()) {
             if (u.getPlayer() != enemy) continue;
 
+            try{
             if (u.getType().name.equals("Light") || u.getType().name.equals("Ranged") || u.getType().name.equals("Worker") || u.getType().name.equals("Heavy") )
             {
                 num_enemies++;
@@ -247,6 +250,10 @@ public class hope extends AbstractionLayerAI {
                         break;
                     }
                 }
+            }
+            }
+            catch(NullPointerException e) {
+                continue;
             }
         }
 
@@ -271,50 +278,208 @@ public class hope extends AbstractionLayerAI {
             return out;
         }
 
+
+
     }
 
-    private String inferEnemyStrategy(int player, GameState gs) {
+    private boolean enemyRaidingMe(int player, GameState gs) {
         PhysicalGameState pgs = gs.getPhysicalGameState();
         int enemy = 1 - player;
+
+        int attack_dist = pgs.getWidth() - (pgs.getWidth()/2);
         
         boolean enemyHasBarracks = false;
         boolean enemyHasLight = false;
+        boolean enemyLightAttacking = false;
         int enemyLightCount = 0;
         boolean enemyHasRanged = false;
+        boolean enemyRangedAttacking = false;
         int enemyRangedCount = 0;
         boolean enemyHasHeavy = false;
+        boolean enemyHeavyAttacking = false;
         int enemyHeavyCount = 0;
         boolean enemyWorkersAttacking = false;
         int enemyWorkerCount = 0;
 
+        int totalArmy = 0;
+        Player enp = gs.getPlayer(enemy);
+        int enemyResources = enp.getResources();
+
         for (Unit u : pgs.getUnits()) {
-            if (u.getPlayer() != enemy) continue;
-            
+            if (u.getPlayer() == player) continue;
+
             if (u.getType().name.equals("Barracks")) enemyHasBarracks = true;
             if (u.getType().name.equals("Light")){
                 enemyHasLight = true;
                 enemyLightCount++;
+                totalArmy++;
+                for (Unit myUnit : pgs.getUnits()) {
+                    try{
+                    if (myUnit.getPlayer() == player && myUnit.getType().name.equals("Base")) {
+                        double dist = Math.abs(u.getX() - myUnit.getX()) + Math.abs(u.getY() - myUnit.getY());
+                        if (dist < attack_dist) enemyLightAttacking = true;
+                        break;
+                    }
+                    }
+                    catch(NullPointerException e) {
+                        continue;
+                    }
+                }
             }
             if (u.getType().name.equals("Ranged")){ 
                 enemyHasRanged = true;
                 enemyRangedCount++;
+                totalArmy++;
+                for (Unit myUnit : pgs.getUnits()) {
+                    try{
+                    if (myUnit.getPlayer() == player && myUnit.getType().name.equals("Base")) {
+                        double dist = Math.abs(u.getX() - myUnit.getX()) + Math.abs(u.getY() - myUnit.getY());
+                        if (dist < attack_dist) enemyRangedAttacking = true;
+                        break;
+                    }
+                    }
+                    catch(NullPointerException e) {
+                        continue;
+                    }
+                }
             }
             if (u.getType().name.equals("Heavy")){
                 enemyHasHeavy = true;
                 enemyHeavyCount++;
+                totalArmy++;
+                for (Unit myUnit : pgs.getUnits()) {
+                    try{
+                    if (myUnit.getPlayer() == player && myUnit.getType().name.equals("Base")) {
+                        double dist = Math.abs(u.getX() - myUnit.getX()) + Math.abs(u.getY() - myUnit.getY());
+                        if (dist < attack_dist) enemyLightAttacking = true;
+                        break;
+                    }
+                    }
+                    catch(NullPointerException e) {
+                        continue;
+                    }
+                }
             }
             if (u.getType().name.equals("Worker")) {
                 enemyWorkerCount++;
                 // Check if worker is moving toward your base (simple proximity check)
                 for (Unit myUnit : pgs.getUnits()) {
+                    try{
                     if (myUnit.getPlayer() == player && myUnit.getType().name.equals("Base")) {
                         double dist = Math.abs(u.getX() - myUnit.getX()) + Math.abs(u.getY() - myUnit.getY());
-                        if (dist < 10) enemyWorkersAttacking = true;
+                        if (dist < attack_dist) enemyWorkersAttacking = true;
                         break;
+                    }
+                    }
+                    catch(NullPointerException e) {
+                        continue;
                     }
                 }
             }
         }
+
+        boolean isAttacking = enemyLightAttacking || enemyHeavyAttacking || enemyRangedAttacking || enemyWorkersAttacking;
+
+        return isAttacking;
+    }
+
+    private String inferEnemyStrategy(int player, GameState gs) {
+        PhysicalGameState pgs = gs.getPhysicalGameState();
+        int enemy = 1 - player;
+
+        int attack_dist = pgs.getWidth();
+        
+        boolean enemyHasBarracks = false;
+        boolean enemyHasLight = false;
+        boolean enemyLightAttacking = false;
+        int enemyLightCount = 0;
+        boolean enemyHasRanged = false;
+        boolean enemyRangedAttacking = false;
+        int enemyRangedCount = 0;
+        boolean enemyHasHeavy = false;
+        boolean enemyHeavyAttacking = false;
+        int enemyHeavyCount = 0;
+        boolean enemyWorkersAttacking = false;
+        int enemyWorkerCount = 0;
+
+        int totalArmy = 0;
+        Player enp = gs.getPlayer(enemy);
+        int enemyResources = enp.getResources();
+
+        for (Unit u : pgs.getUnits()) {
+            if (u.getPlayer() == player) continue;
+
+            if (u.getType().name.equals("Barracks")) enemyHasBarracks = true;
+            if (u.getType().name.equals("Light")){
+                enemyHasLight = true;
+                enemyLightCount++;
+                totalArmy++;
+                for (Unit myUnit : pgs.getUnits()) {
+                    try{
+                    if (myUnit.getPlayer() == player && myUnit.getType().name.equals("Base")) {
+                        double dist = Math.abs(u.getX() - myUnit.getX()) + Math.abs(u.getY() - myUnit.getY());
+                        if (dist < attack_dist) enemyLightAttacking = true;
+                        break;
+                    }
+                    }
+                    catch(NullPointerException e) {
+                        continue;
+                    }
+                }
+            }
+            if (u.getType().name.equals("Ranged")){ 
+                enemyHasRanged = true;
+                enemyRangedCount++;
+                totalArmy++;
+                for (Unit myUnit : pgs.getUnits()) {
+                    try{
+                    if (myUnit.getPlayer() == player && myUnit.getType().name.equals("Base")) {
+                        double dist = Math.abs(u.getX() - myUnit.getX()) + Math.abs(u.getY() - myUnit.getY());
+                        if (dist < attack_dist) enemyRangedAttacking = true;
+                        break;
+                    }
+                    }
+                    catch(NullPointerException e) {
+                        continue;
+                    }
+                }
+            }
+            if (u.getType().name.equals("Heavy")){
+                enemyHasHeavy = true;
+                enemyHeavyCount++;
+                totalArmy++;
+                for (Unit myUnit : pgs.getUnits()) {
+                    try{
+                    if (myUnit.getPlayer() == player && myUnit.getType().name.equals("Base")) {
+                        double dist = Math.abs(u.getX() - myUnit.getX()) + Math.abs(u.getY() - myUnit.getY());
+                        if (dist < attack_dist) enemyHeavyAttacking = true;
+                        break;
+                    }
+                    }
+                    catch(NullPointerException e) {
+                        continue;
+                    }
+                }
+            }
+            if (u.getType().name.equals("Worker")) {
+                enemyWorkerCount++;
+                // Check if worker is moving toward your base (simple proximity check)
+                for (Unit myUnit : pgs.getUnits()) {
+                    try{
+                    if (myUnit.getPlayer() == player && myUnit.getType().name.equals("Base")) {
+                        double dist = Math.abs(u.getX() - myUnit.getX()) + Math.abs(u.getY() - myUnit.getY());
+                        if (dist < attack_dist) enemyWorkersAttacking = true;
+                        break;
+                    }
+                    }
+                    catch(NullPointerException e) {
+                        continue;
+                    }
+                }
+            }
+        }
+
+        boolean isAttacking = enemyLightAttacking || enemyHeavyAttacking || enemyRangedAttacking || enemyWorkersAttacking;
         
         // for 8x8 
         if(pgs.getWidth() <= 8)
@@ -332,45 +497,68 @@ public class hope extends AbstractionLayerAI {
             }
             return "UNKNOWN... probably TURTLE";
         }
+
+        // all other map sizes (MORE IMPORTANT)
         else
         {
-            if ( (enemyHasHeavy && enemyHasLight) || (enemyHasHeavy && enemyHasRanged) || (enemyHasLight && enemyHasRanged) )
+            // RULE 1: Worker rush — training workers with attack, no/minimal military
+            if ( (enemyWorkerCount >= 4) && (totalArmy == 0) && isAttacking )
             {
-                // balanced
-                return "BALANCED";
+                return "WORKER_RUSH";
             }
-            else if(enemyWorkerCount >= 6)
-            {
-                if(enemyWorkersAttacking)
-                {
-                    return "WORKER_RUSH";
-                }
-                return "ECONOMY_BOOM";
-            }
-            else if(enemyLightCount >= 2)
+
+            // RULE 2: Light rush — training lights + attack
+            if( (enemyLightCount >= 2) && !enemyHasHeavy && !enemyHasRanged && isAttacking )
             {
                 return "LIGHT_RUSH";
             }
-            else if(enemyHeavyCount >= 2)
+
+            // RULE 3: Heavy rush — training heavy + attack
+            if( (enemyHeavyCount >= 2) && !enemyHasLight && !enemyHasRanged && isAttacking )
             {
                 return "HEAVY_RUSH";
             }
-            else if(enemyRangedCount >= 2)
+
+             // RULE 4: Ranged rush — training ranged + attack
+            if( (enemyRangedCount >= 2) && !enemyHasLight && !enemyHasHeavy && isAttacking )
             {
                 return "RANGED_RUSH";
             }
+
+            // RULE 5: Turtle — training ranged + defend (no attack)
+            if( (enemyRangedCount > 0) && !isAttacking )
+            {
+                return "TURTLE";
+            }
+
+            // RULE 6: Economy boom — high harvest or worker training + some military
+            if( (enemyWorkerCount >= 4 || enemyResources >= 4) && (totalArmy > 0) )
+            {
+                return "ECONOMY_BOOM";
+            }
+
+            // RULE 7: If nothing else, check for starting strats or is balanced.
             else
             {
-                if(gs.getTime() < 100)
+                if(enemyRangedCount > enemyHeavyCount && enemyRangedCount > enemyLightCount)
                 {
-                    return "UNKNOWN... too early to tell!";
+                    return "RANGED_RUSH";
                 }
-                return "UNKNOWN... probably TURTLE";
+                else if(enemyLightCount > enemyRangedCount && enemyLightCount > enemyHeavyCount)
+                {
+                    return "LIGHT_RUSH";
+                }
+                else if(enemyHeavyCount > enemyRangedCount && enemyHeavyCount > enemyLightCount)
+                {
+                    return "HEAVY_RUSH";
+                }
+                else
+                {
+                    return "BALANCED";
+                }
             }
 
         }
-
-        //return "UNKNOWN... probably TURTLE";
     }
 
     /**
@@ -418,6 +606,7 @@ public class hope extends AbstractionLayerAI {
         String enemyStrategy = inferEnemyStrategy(player, gs);
         String enemyLocation = enemyTracker(player, gs);
         int mapSize = pgs.getWidth();
+        boolean enemyRading = enemyRaidingMe(player,gs);
 
         // Determine game phase
         int maxCycles = 3000;  // Default, could be read from config
@@ -459,7 +648,7 @@ public class hope extends AbstractionLayerAI {
         sb.append(enemyStrength).append("\n\n");
         sb.append("Enemy appears to be using: ").append(enemyStrategy).append("\n\n");
         if(mapSize <= 8){
-            sb.append("COUNTER STRATEGIES (8x8 MAP):\n");
+            sb.append("RECOMMENDED COUNTER STRATEGY:\n");
             sb.append("- You MUST use WORKER_RUSH immediately.\n");
             sb.append("  * Send two workers immediately to attack enemy.\n");
             sb.append("  * Do not spend time getting resources.\n");
@@ -468,18 +657,54 @@ public class hope extends AbstractionLayerAI {
         }
         else if(mapSize > 8)
         {
-            sb.append("COUNTER STRATEGIES (16x16 or 32x32 MAP):\n");
-            sb.append("- If game phase is EARLY or MID and enemy is using a rush strategy:\n");
-            sb.append("  * HEAVY_RUSH counters LIGHT_RUSH.\n");
-            sb.append("  * LIGHT_RUSH counters RANGED_RUSH.\n");
-            sb.append("  * RANGED_RUSH counters HEAVY_RUSH.\n");
-            sb.append("  * Continue using strategy to win if enemy has losing score even in LATE phase.\n");
-            sb.append("- If game phase is MID or LATE and there are still many resources on the map:\n");
-            sb.append("  * ECONOMY_BOOM works to maintain high resources and build up forces.\n");
-            sb.append("  * BALANCED can work to counter general enemy attacks since they are not favoring one unit over another.\n");
-            sb.append("- If strength is much lower than enemy and enemy is attacking:\n");
-            sb.append("  * TURTLE works to repel enemy attack and hopefully rebound from bad situation.\n");
-            sb.append("  * Remember to begin rebuilding forces as soon as possible and harvest resources while defending BASE at all costs.\n");
+            sb.append("RECOMMENDED COUNTER STRATEGY:\n");
+            // if WINNING -> keep doing strategy!
+            if( (myStrength/2) >= enemyStrength )
+            {
+                sb.append("- You are WINNING! Continue using the current strategy: ").append(currentStrategy).append("\n\n");
+            }
+            else if( ( (enemyStrength/2) >= myStrength ) && enemyRading )
+            {
+                sb.append("- You are LOSING! Use the strategy: TURTLE \n\n");
+            }
+            else
+            {
+                // RULE 1: Use LIGHT_RUSH against WORKER_RUSH
+                if(enemyStrategy.equals("WORKER_RUSH"))
+                {
+                    sb.append("- Use the strategy: LIGHT_RUSH \n\n");
+                }
+
+                //RULE 2: Use HEAVY_RUSH against LIGHT_RUSH
+                else if(enemyStrategy.equals("LIGHT_RUSH"))
+                {
+                    sb.append("- Use the strategy: HEAVY_RUSH \n\n");
+                }
+
+                // RULE 3: Use RANGED_RUSH against HEAVY_RUSH
+                else if(enemyStrategy.equals("HEAVY_RUSH"))
+                {
+                    sb.append("- Use the strategy: RANGED_RUSH \n\n");
+                }
+
+                // RULE 4: Use LIGHT_RUSH against RANGED_RUSH
+                else if(enemyStrategy.equals("RANGED_RUSH"))
+                {
+                    sb.append("- Use the strategy: LIGHT_RUSH \n\n");
+                }
+
+                // RULE 5: Use any ECONOMY BOOM against TURTLE
+                else if(enemyStrategy.equals("TURTLE"))
+                {
+                    sb.append("- Use the strategy: ECONOMY_BOOM \n\n");
+                }
+
+                // RULE 6: Use BALANCED if all else not passed.
+                else
+                {
+                    sb.append("- Use the strategy: BALANCED \n\n");
+                }
+            }
         }
         sb.append("CURRENT GAME PHASE:\n");
         sb.append("- If time < 100 and enemy has more workers fighting: WORKER_RUSH is mandatory.\n");
