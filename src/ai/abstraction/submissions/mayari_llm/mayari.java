@@ -9,7 +9,7 @@ import ai.abstraction.WorkerRushPlusPlus;
 
 import com.google.gson.JsonObject;
 
-// 1. import required libraries
+//import required libraries
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -75,7 +75,8 @@ public class mayari extends AIWithComputationBudget {
     UnitTypeTable _utt = null;
     
     AStarPathFinding _astarPath;
-    WorkerRushPlusPlus _wrpp;
+    // WorkerRushPlusPlus _wrpp;
+
     
     int NoDirection = 100; //this is a hack
     long _startCycleMilli;
@@ -216,7 +217,7 @@ public class mayari extends AIWithComputationBudget {
         _utt = utt;
         restartPathFind(); //FloodFillPathFinding(); //AStarPathFinding();
         _memHarvesters = new ArrayList<>();
-        _wrpp = new WorkerRushPlusPlus(utt);
+        //_wrpp = new WorkerRushPlusPlus(utt);
                 
         _dirs = new ArrayList<>();
         _dirs.add(UnitAction.DIRECTION_UP);
@@ -1298,7 +1299,7 @@ public class mayari extends AIWithComputationBudget {
         sb.append("- Enemy Lights: ").append(_enemyLights.size()).append("\n");
         
         sb.append("\nChoose ONE of the following strategies: \n");
-        sb.append("1. BUILD_ECONOMY (Maximize resource collection early. Train many workers. Build military late but with superior resources. GOOD FOR SLOW GAMES ON LARGE MAPS)\n");
+        sb.append("1. BUILD_ECONOMY (Focus entirely on workers and expanding to a 2nd base. Best for early-game on 16x16 and 32x32 maps and 64x64 maps.)\n");
         sb.append("2. RUSH_HEAVY (Focus on building and attacking with Heavies. Counters LIGHT units)\n");
         sb.append("3. RUSH_LIGHT (Focus on building and attacking with Light units. Counters RANGED units)\n");
         sb.append("4. RUSH_RANGED (Focus on building and attacking with Ranged units. Counters HEAVY units)\n");
@@ -1359,15 +1360,151 @@ public class mayari extends AIWithComputationBudget {
     public PlayerAction getAction(int player, GameState gs) throws Exception {
         _gs = gs;
         _pgs = gs.getPhysicalGameState();
-
-        // --- 8x8 MAP BYPASS ---
-        if (_pgs.getWidth() <= 8) return _wrpp.getAction(player, gs);
-
-         _p = gs.getPlayer(player);
+        _p = gs.getPlayer(player);
         _enemyP = gs.getPlayer(player == 0 ? 1 : 0);
         
         _pa = new PlayerAction();
         init();
+
+        // better swarm than WorkerRush++
+        if (_pgs.getWidth() <= 12) {
+            // 1. Train workers non-stop
+            for (Unit base : _bases) {
+                if (!busy(base) && _p.getResources() - _resourcesUsed >= _utt.getUnitType("Worker").cost) {
+                    int dirBuild = bestBuildWorkerDir(base);
+                    boolean succ = produce(base, dirBuild, _utt.getUnitType("Worker"));
+                    if (!succ) produceWherever(base, _utt.getUnitType("Worker"));
+                }
+            }
+            
+            // 2. Build base if we have none
+            if (_bases.isEmpty() && !_workers.isEmpty()) {
+                buildBase();
+            }
+            
+            // 3. "Zero-Resource Swarm" Split
+            List<Unit> battleWorkers = new ArrayList<>();
+            List<Unit> harvestWorkers = new ArrayList<>();
+            
+            if (_p.getResources() == 0) {
+                battleWorkers.addAll(_workers); // ALL IN!
+            } else {
+                int neededHarvesters = Math.max(1, _bases.size());
+                for (int i = 0; i < _workers.size(); i++) {
+                    if (i < neededHarvesters) harvestWorkers.add(_workers.get(i));
+                    else battleWorkers.add(_workers.get(i));
+                }
+            }
+            
+            // 4. Execute Tasks
+            goCombat(battleWorkers, 35); // Send the swarm to fight
+            
+            for (Unit w : harvestWorkers) {
+                if (busy(w)) continue;
+                if (w.getResources() == 0) {
+                    goHarvesting(w); 
+                } else {
+                    Unit base = closest(w, _bases);
+                    if (base != null) {
+                        if (distance(w, base) <= 1) returnHarvest(w, base);
+                        else moveTowards(w, toPos(base));
+                    }
+                }
+            }
+            
+            _pa.fillWithNones(gs, player, 1);
+            return _pa;
+        } 
+        // NEW STRATEGY for 16x16
+        else if (_pgs.getWidth() <= 16) {
+            
+            // 1. The "Bodyguard" & Harvester Split
+            int maxHarvesters = _bases.size() * 2;
+            List<Unit> harvestWorkers = new ArrayList<>();
+            List<Unit> combatWorkers = new ArrayList<>();
+            List<Unit> bodyguards = new ArrayList<>();
+
+            for (int i = 0; i < _workers.size(); i++) {
+                if (i < maxHarvesters) harvestWorkers.add(_workers.get(i));
+                else if (bodyguards.size() < 2) bodyguards.add(_workers.get(i)); // Secret meat-shields
+                else combatWorkers.add(_workers.get(i));
+            }
+
+            // 2. Build Minimum Infrastructure
+            if (_bases.isEmpty() && !_workers.isEmpty() && _p.getResources() >= _utt.getUnitType("Base").cost) buildBase();
+            if (_barracks.isEmpty() && _p.getResources() >= _utt.getUnitType("Barracks").cost) buildBracks();
+            for (Unit base : _bases) {
+                if (!busy(base) && _workers.size() < 6 && _p.getResources() >= _utt.getUnitType("Worker").cost) {
+                    produceWherever(base, _utt.getUnitType("Worker"));
+                }
+            }
+
+            // 3. Adaptive Production (Ranged unless Enemy has Heavies)
+            for (Unit barrack : _barracks) {
+                if (!busy(barrack)) {
+                    if (_enemyHeavies.isEmpty() && _p.getResources() >= _utt.getUnitType("Ranged").cost) {
+                        produceCombat(barrack, _utt.getUnitType("Ranged"));
+                    } else if (_p.getResources() >= _utt.getUnitType("Heavy").cost) {
+                        produceCombat(barrack, _utt.getUnitType("Heavy"));
+                    }
+                }
+            }
+
+            // 4. The Barracks Snipe Override
+            List<Unit> enemyBarracks = new ArrayList<>();
+            for (Unit e : _enemies) if (e.getType() == _utt.getUnitType("Barracks")) enemyBarracks.add(e);
+
+            List<Unit> military = new ArrayList<>();
+            military.addAll(_heavies);
+            military.addAll(_archers);
+            military.addAll(_lights);
+
+            for (Unit m : military) {
+                if (busy(m)) continue;
+                if (!enemyBarracks.isEmpty()) {
+                    // Ignore enemies, walk straight to their Barracks and destroy them
+                    Unit targetBracks = closest(m, enemyBarracks);
+                    if (distance(toPos(m), toPos(targetBracks)) <= m.getAttackRange()) {
+                        // Attack if in range (Mayari's native logic expects abstract actions, but we can path to it)
+                        moveTowards(m, toPos(targetBracks)); 
+                    } else {
+                        moveTowards(m, toPos(targetBracks));
+                    }
+                } else {
+                    goCombat(Collections.singletonList(m), 15); // Normal combat if no Barracks exist
+                }
+            }
+
+            // 6. Worker Execution
+            boolean baseUnderAttack = false;
+            if (!_bases.isEmpty() && !_enemiesCombat.isEmpty()) {
+                Unit closestThreat = closest(toPos(_bases.get(0)), _enemiesCombat);
+                if (closestThreat != null && distance(toPos(_bases.get(0)), toPos(closestThreat)) <= 8) baseUnderAttack = true;
+            }
+
+            if (baseUnderAttack) {
+                goCombat(_workers, 35); // Everyone defends
+            } else {
+                for (Unit w : harvestWorkers) {
+                    if (!busy(w)) {
+                        if (w.getResources() == 0) goHarvesting(w);
+                        else returnHarvest(w, closest(w, _bases));
+                    }
+                }
+                for (Unit w : bodyguards) {
+                    // Bodyguards just stay near the base to block pathing
+                    if (!busy(w) && !_bases.isEmpty() && distance(toPos(w), toPos(_bases.get(0))) > 3) {
+                        moveTowards(w, toPos(_bases.get(0)));
+                    } else if (!busy(w)) {
+                        freeBlocks(Collections.singletonList(w));
+                    }
+                }
+                goCombat(combatWorkers, 35);
+            }
+            
+            _pa.fillWithNones(gs, player, 1);
+            return _pa;
+        }
 
         // --- LLM MACRO LOGIC ---
         if (llmCooldown <= 0) {
@@ -1379,11 +1516,11 @@ public class mayari extends AIWithComputationBudget {
         // --- MICRO EXECUTION BASED ON MACRO STRATEGY ---
         attackNearby();
 
-        // Threat detection: is an enemy within 6 tiles of any base?
+        // Threat detection: is an enemy within 10 tiles of any base?
         boolean baseUnderAttack = false;
         for (Unit base : _bases) {
             Unit closestEnemy = closest(base, _enemies);
-            if (closestEnemy != null && distance(toPos(base), toPos(closestEnemy)) <= 6) {
+            if (closestEnemy != null && distance(toPos(base), toPos(closestEnemy)) <= 10) {
                 baseUnderAttack = true;
                 break;
             }
@@ -1429,26 +1566,41 @@ public class mayari extends AIWithComputationBudget {
                 goCombat(_archers, 15);
                 goCombat(_lights, 5);
             } else {
-                // If safe, keep military idle near base and economy running
                 workerAction();
                 freeBlocks(_workers);
             }
         }
         else {
-            buildBracks();
-            buildBase();
-            barracksAction();
-            basesAction();
+            if (_workers.size() >= 8 || _bases.size() >= 2) buildBracks();
             
-            // This should hopefully be able to beat WorkerRush
-            if (baseUnderAttack || shouldWorkersAttack()) {
-                goCombat(_workers, 35);
-            } else {
-                workerAction();
+            if (_p.getResources() >= _utt.getUnitType("Base").cost + 2) buildBase();
+
+            basesAction();
+
+            List<Unit> combatWorkers = new ArrayList<>();
+            List<Unit> harvestWorkers = new ArrayList<>();
+            int maxHarvesters = _bases.size() * 2; // 2 workers per base max!
+
+            for (int i = 0; i < _workers.size(); i++) {
+                if (i < maxHarvesters) harvestWorkers.add(_workers.get(i));
+                else combatWorkers.add(_workers.get(i)); // Extra workers become fighters/scouts
+            }
+
+            if (baseUnderAttack) goCombat(_workers, 35);
+            else {
+                // safely assign harvesting without causing traffic jams
+                for (Unit w : harvestWorkers) {
+                    if (!busy(w)) {
+                        if (w.getResources() == 0) goHarvesting(w);
+                        else returnHarvest(w, closest(w, _bases));
+                    }
+                }
+                // extra workers go hunt the enemy
+                goCombat(combatWorkers, 35);
                 freeBlocks(_workers);
             }
-            // -------------------------------
             
+            // if any military exists, send it
             goCombat(_heavies, 30);
             goCombat(_archers, 15);
             goCombat(_lights, 5);

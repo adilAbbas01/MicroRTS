@@ -1358,7 +1358,7 @@ public class mayari extends AIWithComputationBudget {
     
     @Override
     public PlayerAction getAction(int player, GameState gs) throws Exception {
-        __gs = gs;
+        _gs = gs;
         _pgs = gs.getPhysicalGameState();
         _p = gs.getPlayer(player);
         _enemyP = gs.getPlayer(player == 0 ? 1 : 0);
