@@ -1,36 +1,41 @@
 # Parker-Riggs AdaptiveRushBot
 
 `AdaptiveRushBot` is a hybrid MicroRTS agent that tries to counter whatever
-the opponent is building. It picks between three scripted rush strategies each
-game and updates that choice as it gains more information about the enemy army.
+the opponent is building. It picks between four scripted rush strategies each
+game and updates that choice as it gains more information about the enemy army
+and the map size.
 
-The three strategies and the reasoning behind each:
+The four strategies and the reasoning behind each:
 
-- **WorkerRush** - floods the map with worker units early, applying fast swarming
-  pressure before the opponent can build dedicated military.
+- **WorkerRush** - floods the map with worker units straight from the base,
+  skipping the barracks ramp. Best for very small maps (4x4) and for emergency
+  base defense when the enemy is already on our doorstep.
 - **LightRush** - trains cheap, fast Light units from a Barracks. Light units
-  destroy Workers very efficiently and are a strong general opener.
-- **HeavyRush** - trains Heavy units instead. They are slower to build but win
-  direct combat against Light units, making this the right counter when the
-  opponent goes LightRush.
+  destroy Workers very efficiently and close the gap on Ranged units.
+- **HeavyRush** - trains Heavy units. Slower to build but win direct combat
+  against Light units.
+- **RangedRush** - trains Ranged units. Kite Heavy units from distance and are
+  the strongest default opener on big maps (16x16 and larger) because range
+  matters more when units have further to travel.
 
-The counter triangle is: Light beats Worker, Heavy beats Light, Worker can
-sometimes pressure Heavy through sheer numbers early in the game.
+The counter triangle: Light beats Ranged, Heavy beats Light, Ranged beats Heavy.
+WorkerRush sits outside the triangle as an emergency / tiny-map option.
 
 ### Decision making
 
 Strategy selection works in two layers:
 
 1. **LLM layer** - every 25 ticks the bot sends a compact game state summary to
-   a local Ollama instance and asks it to pick one of the three strategies. The
-   prompt includes the current tick, map dimensions, your own unit counts, and a
-   per-type breakdown of visible enemy units so the model has enough context to
-   reason about counters.
+   a local Ollama instance and asks it to pick one of the four strategies. The
+   prompt includes the current tick, map dimensions, a map-size tier
+   (tiny/small/medium/large), your own unit counts, and a per-type breakdown of
+   visible enemy units including Ranged so the model can apply the counter
+   triangle correctly.
 2. **Heuristic fallback** - if Ollama is not running, times out, or returns
-   something unparseable, a hand-written rule set takes over. It checks the
-   enemy composition in priority order (Heavy units visible? Go HeavyRush.
-   Only workers visible? Go LightRush. Already committed to a military type?
-   Stay the course.) and always produces a sensible answer.
+   something unparseable, a hand-written rule set takes over. It checks for
+   emergency defense first, then commitment to an existing military type, then
+   the visible enemy composition, then economy/time thresholds scaled to the
+   map size.
 
 ## Files
 
@@ -144,18 +149,32 @@ Experiment/benchmark artifacts in this repo:
 When the LLM is unavailable the bot evaluates these rules in order and uses the
 first one that fires:
 
-1. Already have 2+ Heavy units built -- keep producing Heavy to avoid wasting ramp time.
-2. Already have 2+ Light units built -- keep producing Light for the same reason.
-3. Enemy Light units visible -- switch to HeavyRush, Heavy wins that fight directly.
-4. Enemy Heavy units visible -- use LightRush, it applies pressure faster than workers.
-5. Enemy has only workers with no military -- use LightRush, Light shreds workers cheaply.
-6. Enemy attackers are within 8 tiles of our base -- use LightRush for the fastest response.
-7. We have 2+ workers built -- economy is set up, time to go military.
-8. Game time has passed the map-size threshold (150 ticks on 8x8, 300 on larger) -- commit.
-9. Default to LightRush as a safe general opener against unknown opponents.
+1. **Emergency defense** -- an enemy attacker is within 8 tiles of our base AND
+   we have zero military built: WorkerRush (skip the barracks, arm workers now).
+2. **Commitment** -- already have 2+ of one combat type built: keep producing
+   that type (Heavy/Light/Ranged).
+3. **Counter the enemy**: enemy Heavy visible -> RangedRush; enemy Ranged
+   visible -> LightRush; enemy Light visible -> HeavyRush.
+4. **Pure-worker enemy** (workers but no military): LightRush.
+5. **Pressure near base** (with some military already built): LightRush.
+6. **Economy is set up OR past the time cutoff**: map-tier default opener.
+7. **Default**: map-tier default opener.
 
-The time threshold is halved on 8x8 maps because those games typically resolve
-in well under 500 ticks, so the transition window needs to be tighter.
+### Map-size tiers
+
+The bot bins maps into tiers and scales its worker threshold, time-to-commit
+threshold, and default opener to each tier:
+
+| Tier   | Map width | Worker threshold | Time cutoff (ticks) | Default opener |
+|--------|-----------|------------------|---------------------|----------------|
+| tiny   | <= 4      | 1                | 75                  | WorkerRush     |
+| small  | <= 8      | 2                | 150                 | LightRush      |
+| medium | <= 12     | 3                | 300                 | LightRush      |
+| large  | >= 16     | 4                | 450                 | RangedRush     |
+
+Bigger maps get a higher worker threshold because the longer supply lines need
+more harvesters to sustain military production, and more time before the bot
+commits to an opener because those games develop slower.
 
 ## Notes
 

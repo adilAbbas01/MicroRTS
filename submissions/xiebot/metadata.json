@@ -5,5 +5,5 @@
   "agent_file": "XieBot.java",
   "model_provider": "ollama",
   "model_name": "llama3.1:8b",
-  "description": "Deterministic 8x8-focused bot with narrow LLM macro control and selective tactical MCTS."
+  "description": "LLM-directed strategy planner for 16x16/32x32 play with bounded economy, production, posture, and selective tactical MCTS."
 }
