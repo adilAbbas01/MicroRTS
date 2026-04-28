@@ -1523,10 +1523,11 @@ public class mayari extends AIWithComputationBudget {
 
 
         // --- MICRO EXECUTION BASED ON MACRO STRATEGY ---
+
+        // Threat detection: is an enemy within 10 tiles of any base?
         boolean baseUnderAttack = false;
         for (Unit base : _bases) {
             Unit closestEnemy = closest(base, _enemies);
-            // If an enemy is within 10 tiles of our base, SOUND THE ALARM!
             if (closestEnemy != null && distance(toPos(base), toPos(closestEnemy)) <= 10) {
                 baseUnderAttack = true;
                 break;
@@ -1608,13 +1609,13 @@ public class mayari extends AIWithComputationBudget {
             if (_workers.size() >= 8 || _bases.size() >= 2) buildBracks();
             
             if (_p.getResources() >= _utt.getUnitType("Base").cost + 2) buildBase();
-            
-            basesAction(); 
-            
+
+            basesAction();
+
             List<Unit> combatWorkers = new ArrayList<>();
             List<Unit> harvestWorkers = new ArrayList<>();
             int maxHarvesters = _bases.size() * 2; // 2 workers per base max!
-            
+
             for (int i = 0; i < _workers.size(); i++) {
                 if (i < maxHarvesters) harvestWorkers.add(_workers.get(i));
                 else combatWorkers.add(_workers.get(i)); // Extra workers become fighters/scouts
@@ -1636,7 +1637,7 @@ public class mayari extends AIWithComputationBudget {
                     }
                 }
                 // extra workers go hunt the enemy
-                goCombat(combatWorkers, 35); 
+                goCombat(combatWorkers, 35);
                 freeBlocks(_workers);
             }
             
