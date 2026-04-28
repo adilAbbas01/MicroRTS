@@ -6,6 +6,7 @@
 // package mayariBot;
 package ai.abstraction.submissions.mayari_llm;
 import ai.abstraction.WorkerRushPlusPlus;
+import ai.mcts.llmguided.LLMInformedMCTS;
 
 import com.google.gson.JsonObject;
 
@@ -75,6 +76,7 @@ public class mayari extends AIWithComputationBudget {
     UnitTypeTable _utt = null;
     
     AStarPathFinding _astarPath;
+    LLMInformedMCTS _mctsAgent;
     // WorkerRushPlusPlus _wrpp;
 
     
@@ -218,6 +220,12 @@ public class mayari extends AIWithComputationBudget {
         restartPathFind(); //FloodFillPathFinding(); //AStarPathFinding();
         _memHarvesters = new ArrayList<>();
         //_wrpp = new WorkerRushPlusPlus(utt);
+        try {
+            _mctsAgent = new LLMInformedMCTS(utt);
+        } catch (Exception e) {
+            System.out.println("Only mayari rules applied currently.");
+            _mctsAgent = null;
+        }
                 
         _dirs = new ArrayList<>();
         _dirs.add(UnitAction.DIRECTION_UP);
@@ -1358,13 +1366,14 @@ public class mayari extends AIWithComputationBudget {
     
     @Override
     public PlayerAction getAction(int player, GameState gs) throws Exception {
-        __gs = gs;
+        _gs = gs;
         _pgs = gs.getPhysicalGameState();
         _p = gs.getPlayer(player);
         _enemyP = gs.getPlayer(player == 0 ? 1 : 0);
         
         _pa = new PlayerAction();
         init();
+        attackNearby(); 
 
         // better swarm than WorkerRush++
         if (_pgs.getWidth() <= 12) {
@@ -1488,7 +1497,13 @@ public class mayari extends AIWithComputationBudget {
                 for (Unit w : harvestWorkers) {
                     if (!busy(w)) {
                         if (w.getResources() == 0) goHarvesting(w);
-                        else returnHarvest(w, closest(w, _bases));
+                        else {
+                            Unit base = closest(w, _bases);
+                            if (base != null) {
+                                if (distance(w, base) <= 1) returnHarvest(w, base);
+                                else moveTowards(w, toPos(base));
+                            }
+                        }
                     }
                 }
                 for (Unit w : bodyguards) {
@@ -1506,15 +1521,8 @@ public class mayari extends AIWithComputationBudget {
             return _pa;
         }
 
-        // --- LLM MACRO LOGIC ---
-        if (llmCooldown <= 0) {
-            askOllamaForStrategy();
-        } else {
-            llmCooldown--;
-        }
 
         // --- MICRO EXECUTION BASED ON MACRO STRATEGY ---
-        attackNearby(); 
         boolean baseUnderAttack = false;
         for (Unit base : _bases) {
             Unit closestEnemy = closest(base, _enemies);
@@ -1524,6 +1532,33 @@ public class mayari extends AIWithComputationBudget {
                 break;
             }
         }
+
+        if (gs.getTime() >= 1000 && _mctsAgent != null && !baseUnderAttack) {
+            try {
+                PlayerAction mctsAction = _mctsAgent.getAction(player, gs);
+                // If MCTS successfully simulated a valid turn, take it!
+                if (mctsAction != null && mctsAction.hasNonNoneActions()) {
+                    return mctsAction;
+                }
+            } catch (Exception e) {}
+        }
+        // -----------------------------
+
+        // build the economy for the first 1000 ticks before asking 
+        if (gs.getTime() < 1000) {
+            currentMacroStrategy = "BUILD_ECONOMY";
+        } 
+        else if (llmCooldown <= 0) {
+            askOllamaForStrategy();
+        } else {
+            llmCooldown--;
+        }
+
+        // If the LLM gets greedy while we are under attack, force a defense
+        if (baseUnderAttack && currentMacroStrategy.equals("BUILD_ECONOMY")) {
+            currentMacroStrategy = "TURTLE";
+        }
+
 
         if (currentMacroStrategy.equals("RUSH_HEAVY")) {
             buildBracks(); 
@@ -1591,7 +1626,13 @@ public class mayari extends AIWithComputationBudget {
                 for (Unit w : harvestWorkers) {
                     if (!busy(w)) {
                         if (w.getResources() == 0) goHarvesting(w);
-                        else returnHarvest(w, closest(w, _bases));
+                        else {
+                            Unit base = closest(w, _bases);
+                            if (base != null) {
+                                if (distance(w, base) <= 1) returnHarvest(w, base);
+                                else moveTowards(w, toPos(base));
+                            }
+                        }
                     }
                 }
                 // extra workers go hunt the enemy
