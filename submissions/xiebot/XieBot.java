@@ -1,51 +1,59 @@
 package ai.mcts.submissions.xiebot;
 
-import ai.RandomBiasedAI;
 import ai.abstraction.AbstractionLayerAI;
 import ai.abstraction.pathfinding.AStarPathFinding;
 import ai.core.AI;
 import ai.core.ParameterSpecification;
-import ai.evaluation.SimpleSqrtEvaluationFunction3;
-import ai.mcts.naivemcts.NaiveMCTS;
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import rts.GameState;
 import rts.PhysicalGameState;
 import rts.Player;
 import rts.PlayerAction;
+import rts.UnitAction;
 import rts.units.Unit;
 import rts.units.UnitType;
 import rts.units.UnitTypeTable;
 
 /**
- * XieBot v5
+ * XieBot
  *
- * Simplified controller:
- * - PPO-style policy inference chooses one of four high-leverage macro modes on a slow schedule.
- * - Scripted logic executes production, economy, and movement cheaply every tick.
- * - NaiveMCTS is used only as a tactical heuristic during dense local fights and base defense.
- *
- * The bot is fully self-contained: no runtime Python process, network calls, or API usage.
- * Exported policy weights must follow the fixed 25 -> 12 -> 8 -> 4 layout.
+ * A deliberately simple tournament bot.  The deterministic script owns every
+ * concrete unit action; Ollama is only asked occasionally to choose a safe
+ * macro preference among RUSH, BALANCED, and ECON.
  */
 public class XieBot extends AbstractionLayerAI {
-    private enum DecisionSource {
-        OPENING,
-        POLICY,
-        FALLBACK,
-        EMERGENCY
+    private enum MacroMode {
+        RUSH,
+        BALANCED,
+        ECON
     }
 
-    private enum OpeningPlan {
-        ANTI_WORKER_RUSH,
-        ANTI_LIGHT_RUSH,
-        ANTI_HEAVY_RUSH,
-        STANDARD_OPENING,
-        LARGE_MAP_BOOM
+    private enum MapClass {
+        SMALL,
+        MEDIUM,
+        LARGE
     }
 
-    // ===== Core unit types =====
+    private static final boolean DEBUG = Boolean.getBoolean("xiebot.debug");
+
+    private static final int LLM_OPENING_TICKS = 300;
+    private static final int LLM_INTERVAL_TICKS = 320;
+    private static final int LLM_CONNECT_TIMEOUT_MS = 100;
+    private static final int LLM_READ_TIMEOUT_MS = 220;
+    private static final int LLM_MAX_RESPONSE_CHARS = 4096;
+    private static final String DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434";
+    private static final String DEFAULT_OLLAMA_MODEL = "llama3.1:8b";
+
     private UnitTypeTable utt;
     private UnitType workerType;
     private UnitType baseType;
@@ -54,204 +62,39 @@ public class XieBot extends AbstractionLayerAI {
     private UnitType rangedType;
     private UnitType heavyType;
 
-    // ===== PPO macro action space =====
-    private enum MacroAction {
-        DEFEND_RUSH,
-        STANDARD_PRESSURE,
-        RANGED_TRANSITION,
-        ECON_BOOM;
-
-        boolean prefersPressure() {
-            return this == STANDARD_PRESSURE;
-        }
-
-        boolean prefersDefense() {
-            return this == DEFEND_RUSH;
-        }
-
-        boolean prefersRanged() {
-            return this == RANGED_TRANSITION;
-        }
-
-        boolean prefersEconomy() {
-            return this == ECON_BOOM;
-        }
-
-        boolean attacksWhenStable() {
-            return this == STANDARD_PRESSURE || this == RANGED_TRANSITION;
-        }
-    }
-
-    private static final MacroAction[] MACRO_ACTIONS = MacroAction.values();
-
-    // ===== Embedded PPO policy config =====
-    private static final int FEATURE_COUNT = 25;
-    private static final int POLICY_HIDDEN_1 = 12;
-    private static final int POLICY_HIDDEN_2 = 8;
-    private static final int ACTION_COUNT = MACRO_ACTIONS.length;
-    private static final int POLICY_DECISION_INTERVAL = 96;
-    private static final int POLICY_LOCK_TICKS = 128;
-    private static final int RECENT_COMBAT_WINDOW = 96;
-    private static final int SMALL_MAP_OPENING_TICKS = 700;
-    private static final int LARGE_MAP_OPENING_TICKS = 900;
-    private static final float POLICY_MIN_CONFIDENCE = 0.34f;
-    private static final float POLICY_MIN_MARGIN = 0.08f;
-    private static final boolean DEBUG = Boolean.getBoolean("xiebot.debug");
-
-    // ===== Exported PPO policy weights =====
-    // Export layout must match the fixed 4-action order:
-    // DEFEND_RUSH, STANDARD_PRESSURE, RANGED_TRANSITION, ECON_BOOM
-
-private static final float[][] PPO_W1 = new float[][]{
-    {-0.03201695f, 0.02389964f, -0.36004615f, -0.38419503f, -0.46816945f, -0.51148880f, -0.26986346f, 0.09862339f, -0.35981795f, 0.02413375f, 0.01903264f, -0.42761990f},
-    {0.15847336f, -0.07443745f, -0.20181148f, -0.08944098f, -0.10585838f, 0.12224854f, -0.03058811f, 0.11835890f, -0.30201510f, 0.15386276f, 0.05549263f, 0.08375218f},
-    {-0.30265978f, -0.01495448f, 0.16629937f, 0.33811471f, 0.29952061f, 0.22168261f, -0.26349795f, -0.30070078f, 0.31218255f, -0.34703681f, -0.18066071f, 0.14578184f},
-    {0.23062873f, 0.07075119f, -0.23474804f, -0.15556486f, 0.08688487f, 0.23946291f, 0.07549202f, 0.26300457f, -0.09025887f, 0.13747306f, 0.30470592f, 0.20407219f},
-    {-0.03843627f, 0.16003333f, -0.36035663f, -0.58089644f, -0.47033611f, -0.31530195f, -0.30152503f, 0.10970266f, -0.46511719f, 0.16469191f, 0.14794312f, -0.60128456f},
-    {0.15368550f, -0.03706460f, -0.34936774f, -0.48179418f, -0.28646627f, -0.20379843f, 0.01827345f, 0.26925552f, -0.50615668f, 0.21670888f, 0.22845580f, -0.45024514f},
-    {-0.02510832f, -0.00778295f, -0.13012388f, -0.26560694f, -0.28013429f, -0.30017236f, -0.30711630f, 0.16371226f, -0.35087833f, 0.05075114f, 0.04016818f, -0.35331103f},
-    {0.19896841f, -0.08912537f, -0.10115449f, -0.10416142f, 0.16637528f, 0.34356129f, 0.18931368f, 0.28806573f, -0.11320275f, 0.29508650f, 0.20629962f, 0.22238390f},
-    {-0.38802421f, 0.02773440f, 0.13958043f, 0.00949504f, -0.12719582f, -0.15852480f, -0.19374001f, -0.12459238f, 0.19437039f, -0.29895544f, -0.28419229f, -0.08322747f},
-    {-0.42631412f, -0.01647443f, 0.17711587f, 0.08781225f, -0.25907066f, -0.24683814f, -0.28554535f, -0.46001869f, 0.15691239f, -0.55874616f, -0.33968395f, -0.20720783f},
-    {-0.66880882f, -0.04728227f, 0.47957963f, 0.21931858f, -0.15352808f, -0.33674446f, -0.75375211f, -0.58889329f, 0.34236598f, -0.61174917f, -0.70291102f, -0.17506336f},
-    {0.02932955f, -0.12294680f, 0.23691073f, 0.28646588f, 0.42187294f, 0.44117036f, -0.04748769f, -0.01962197f, 0.18326862f, -0.00572757f, 0.01610500f, 0.42154470f},
-    {0.08170914f, -0.10221801f, 0.15930519f, 0.08357475f, 0.52462649f, 0.57538664f, 0.01687719f, 0.12047147f, -0.05816217f, 0.13449028f, 0.10229778f, 0.53958434f},
-    {0.03644435f, -0.06454767f, 0.16362278f, -0.02435532f, 0.07809260f, 0.46749553f, 0.31717005f, 0.05924666f, 0.00709970f, 0.08367819f, 0.00979481f, 0.35539803f},
-    {-0.02267172f, 0.00571535f, 0.18904734f, 0.22998874f, 0.28326213f, 0.56659889f, 0.03548321f, -0.09770085f, 0.30144471f, -0.10719223f, 0.00210958f, 0.47311959f},
-    {0.10127424f, -0.04063688f, -0.23389915f, -0.25931692f, -0.00984239f, -0.03952233f, 0.02996833f, 0.20950754f, -0.30243304f, 0.16445608f, 0.03238981f, 0.18482205f},
-    {0.55230057f, -0.01125667f, -0.57343525f, -0.45849857f, 0.07291926f, 0.06628775f, 0.44729671f, 0.66371876f, -0.68823093f, 0.66710627f, 0.58031982f, 0.09630738f},
-    {0.41403711f, 0.11875564f, -0.44622946f, -0.49758410f, 0.07031149f, -0.07599695f, 0.16281711f, 0.35677865f, -0.51103151f, 0.26488727f, 0.33871308f, -0.01476461f},
-    {0.22896831f, 0.00308278f, -0.55080849f, -0.55078524f, -0.18054768f, -0.54293621f, -0.00187068f, 0.36035702f, -0.48291439f, 0.34757224f, 0.22014187f, -0.35132509f},
-    {0.37931004f, -0.07093135f, -0.46915251f, -0.52019113f, -0.04978148f, 0.08147376f, 0.31707621f, 0.36957651f, -0.42736238f, 0.49793804f, 0.41489643f, -0.10380308f},
-    {-0.36026016f, 0.05945578f, 0.23143369f, 0.16589291f, -0.06258313f, 0.04733161f, -0.15436345f, -0.47935629f, 0.17506775f, -0.50509864f, -0.56653297f, -0.09599257f},
-    {0.14248978f, 0.00376959f, -0.07195212f, -0.06977081f, 0.11413642f, -0.00624908f, -0.02330985f, 0.03879537f, 0.00567506f, 0.11456390f, 0.08189324f, 0.01760130f},
-    {-0.00193229f, 0.04088870f, -0.09238309f, 0.05320313f, -0.09639032f, -0.00130866f, 0.02888636f, 0.00048456f, 0.08022503f, 0.11604743f, 0.02510346f, 0.05711210f},
-    {0.03738160f, -0.20908476f, 0.04711387f, 0.02101590f, 0.12640852f, 0.02086297f, -0.04649977f, 0.02875594f, 0.10922825f, 0.04831474f, 0.01008672f, 0.24113834f},
-    {0.01440021f, -0.03115442f, -0.14983790f, 0.10358918f, 0.08473469f, 0.05531862f, 0.04971097f, 0.07369699f, -0.00680807f, 0.05308900f, 0.04421225f, 0.00517998f}
-};
-
-private static final float[] PPO_B1 = new float[]{0.01786213f, 0.00000000f, 0.03078385f, 0.02764079f, 0.10782601f, 0.09013186f, -0.02025042f, 0.05433403f, 0.01778700f, 0.03731877f, 0.01924683f, 0.10374275f};
-
-private static final float[][] PPO_W2 = new float[][]{
-    {0.18417680f, -0.54683459f, 0.07078879f, -0.06038831f, -0.61250663f, 0.24785978f, -0.54210401f, 0.07354746f},
-    {-0.02769455f, -0.08872427f, -0.00534892f, 0.06989264f, -0.03140298f, -0.01817941f, -0.01768275f, 0.00876755f},
-    {-0.80195546f, 0.08582719f, -0.74868262f, 0.07537419f, 0.02530822f, -0.62496620f, 0.21749656f, -0.70798755f},
-    {-0.52970272f, 0.13098440f, -0.47325712f, -0.07522067f, 0.12910198f, -0.31268805f, 0.10346507f, -0.56456274f},
-    {0.08814735f, 0.30422646f, 0.04237057f, -0.09798340f, 0.36170316f, 0.15695806f, 0.34762993f, 0.23566146f},
-    {0.27064273f, 0.31663042f, 0.37557110f, -0.02187353f, 0.22657748f, 0.15144452f, 0.23551123f, 0.29711631f},
-    {0.35421833f, -0.54216027f, 0.26313820f, -0.05216269f, -0.42106998f, 0.27582976f, -0.47983304f, 0.33400759f},
-    {-0.00170825f, -0.64507222f, 0.04457243f, -0.02156335f, -0.56869531f, 0.22390021f, -0.57646316f, 0.02119452f},
-    {-0.65905005f, 0.05297268f, -0.69276470f, -0.10804359f, 0.07363366f, -0.48618788f, 0.02520275f, -0.73331207f},
-    {0.00830581f, -0.72597623f, 0.10238249f, 0.16510084f, -0.62530810f, 0.02520561f, -0.76055032f, 0.02723595f},
-    {0.04580354f, -0.74168259f, 0.08525670f, -0.10696840f, -0.51839036f, 0.18167369f, -0.54420602f, 0.00128378f},
-    {0.28539562f, 0.24637495f, 0.18108492f, -0.02960830f, 0.15628320f, 0.14101402f, 0.28943664f, 0.18440033f}
-};
-
-private static final float[] PPO_B2 = new float[]{0.08204690f, 0.09804151f, 0.09286598f, -0.01138246f, 0.11282070f, 0.11820723f, 0.05818675f, 0.06166885f};
-
-private static final float[][] PPO_W3 = new float[][]{
-    {0.01669501f, 0.02678507f, 0.00335847f, -0.23682162f},
-    {0.14406532f, -0.20880899f, 0.26114619f, -0.33068180f},
-    {0.11660985f, 0.08709146f, -0.25587907f, -0.12998858f},
-    {0.07536386f, 0.06221622f, -0.07636169f, -0.00126753f},
-    {0.12672409f, -0.19589292f, 0.04461608f, -0.15373135f},
-    {0.01309221f, 0.03138942f, -0.15717024f, -0.19790195f},
-    {0.09179147f, -0.16930315f, 0.13588597f, -0.33486354f},
-    {0.03000853f, -0.01068947f, -0.07855564f, -0.26982901f}
-};
-
-private static final float[] PPO_B3 = new float[]{0.09567998f, -0.06419884f, 0.02870183f, -0.12045155f};
-
-    // ===== Tactical MCTS config =====
-    private final NaiveMCTS tacticalMCTS;
-    private static final int MCTS_TIME_BUDGET_MS = 35;
-    private static final int MCTS_LOOKAHEAD = 80;
-    private static final int MCTS_MAX_DEPTH = 8;
-    private static final int DEFENSE_RADIUS = 6;
-
-    // ===== Runtime state =====
-    private OpeningPlan currentOpeningPlan = OpeningPlan.STANDARD_OPENING;
-    private MacroAction currentMacroAction = MacroAction.STANDARD_PRESSURE;
-    private int lastOpeningDecisionTime = -9999;
-    private int lastPolicyEvaluationTime = -9999;
-    private int lastStrategyChangeTime = -9999;
-    private int lastCombatTime = -9999;
-    private float lastPolicyConfidence = 0.0f;
-    private float lastPolicyMargin = 0.0f;
-    private DecisionSource lastDecisionSource = DecisionSource.FALLBACK;
-    private int policyDecisionCount = 0;
-    private int openingDecisionCount = 0;
-    private int fallbackDecisionCount = 0;
-    private int emergencyDecisionCount = 0;
-    private int mctsAttemptCount = 0;
-    private int mctsSuccessCount = 0;
-    private int firstEnemyBarracksSeenTime = -1;
-    private int firstEnemyMilitarySeenTime = -1;
-    private int firstOwnBarracksSeenTime = -1;
-    private int firstDefenderSeenTime = -1;
-    private int firstMctsAttemptTime = -1;
-    private int firstMctsSuccessTime = -1;
-    private int openingStartWorkerCount = -1;
-    private int openingWorkerLosses = 0;
-    private int lastDebugDecisionTime = -9999;
+    private MacroMode currentMode = MacroMode.BALANCED;
+    private MacroMode lastLlmMode = null;
+    private int lastLlmQueryTime = -9999;
+    private int lastDebugTime = -9999;
+    private int llmFailures = 0;
 
     public XieBot(UnitTypeTable a_utt) {
         super(new AStarPathFinding());
-        tacticalMCTS = new NaiveMCTS(
-                MCTS_TIME_BUDGET_MS,
-                -1,
-                MCTS_LOOKAHEAD,
-                MCTS_MAX_DEPTH,
-                0.25f,
-                0.0f,
-                0.35f,
-                new RandomBiasedAI(),
-                new SimpleSqrtEvaluationFunction3(),
-                true
-        );
         reset(a_utt);
     }
 
     @Override
     public void reset(UnitTypeTable a_utt) {
         utt = a_utt;
-        workerType = utt.getUnitType("Worker");
-        baseType = utt.getUnitType("Base");
-        barracksType = utt.getUnitType("Barracks");
-        lightType = utt.getUnitType("Light");
-        rangedType = utt.getUnitType("Ranged");
-        heavyType = utt.getUnitType("Heavy");
+        if (utt != null) {
+            workerType = utt.getUnitType("Worker");
+            baseType = utt.getUnitType("Base");
+            barracksType = utt.getUnitType("Barracks");
+            lightType = utt.getUnitType("Light");
+            rangedType = utt.getUnitType("Ranged");
+            heavyType = utt.getUnitType("Heavy");
+        }
         reset();
     }
 
     @Override
     public void reset() {
         super.reset();
-        currentOpeningPlan = OpeningPlan.STANDARD_OPENING;
-        currentMacroAction = MacroAction.STANDARD_PRESSURE;
-        lastOpeningDecisionTime = -9999;
-        lastPolicyEvaluationTime = -9999;
-        lastStrategyChangeTime = -9999;
-        lastCombatTime = -9999;
-        lastPolicyConfidence = 0.0f;
-        lastPolicyMargin = 0.0f;
-        lastDecisionSource = DecisionSource.FALLBACK;
-        policyDecisionCount = 0;
-        openingDecisionCount = 0;
-        fallbackDecisionCount = 0;
-        emergencyDecisionCount = 0;
-        mctsAttemptCount = 0;
-        mctsSuccessCount = 0;
-        firstEnemyBarracksSeenTime = -1;
-        firstEnemyMilitarySeenTime = -1;
-        firstOwnBarracksSeenTime = -1;
-        firstDefenderSeenTime = -1;
-        firstMctsAttemptTime = -1;
-        firstMctsSuccessTime = -1;
-        openingStartWorkerCount = -1;
-        openingWorkerLosses = 0;
-        lastDebugDecisionTime = -9999;
-        tacticalMCTS.reset();
+        currentMode = MacroMode.BALANCED;
+        lastLlmMode = null;
+        lastLlmQueryTime = -9999;
+        lastDebugTime = -9999;
+        llmFailures = 0;
     }
 
     @Override
@@ -261,1253 +104,934 @@ private static final float[] PPO_B3 = new float[]{0.09567998f, -0.06419884f, 0.0
 
     @Override
     public PlayerAction getAction(int player, GameState gs) {
-        if (!gs.canExecuteAnyAction(player)) {
-            return new PlayerAction();
-        }
+        actions.clear();
 
         PhysicalGameState pgs = gs.getPhysicalGameState();
-        int enemy = 1 - player;
+        Player p = gs.getPlayer(player);
+        Snapshot s = analyze(player, gs, pgs);
 
-        Counts my = countUnits(pgs, player);
-        Counts opp = countUnits(pgs, enemy);
+        MacroMode heuristicMode = chooseHeuristicMode(s);
+        MacroMode llmMode = maybeAskLlm(s, heuristicMode);
+        currentMode = chooseFinalMode(s, heuristicMode, llmMode);
 
-        boolean smallMap = pgs.getWidth() * pgs.getHeight() <= 100;
-        boolean opening = isOpeningPhase(gs, smallMap);
-        float basePressure = basePressureIndicator(pgs, my, enemy);
-        boolean enemyNearBase = isEnemyNearBase(pgs, my, enemy, 4) || basePressure >= 0.60f;
-        updateOpeningTelemetry(gs.getTime(), my, opp, opening);
+        int targetWorkers = targetWorkers(s, currentMode);
+        int desiredBarracks = desiredBarracks(s, currentMode, targetWorkers);
+        int availableResources = p.getResources();
+        List<Integer> reservedPositions = new ArrayList<>();
 
-        boolean combatNow = isCombatHappening(pgs, my, enemy);
-        if (combatNow) {
-            lastCombatTime = gs.getTime();
-        }
-        boolean recentCombat = combatNow || gs.getTime() - lastCombatTime <= RECENT_COMBAT_WINDOW;
+        availableResources = maybeBuildReplacementBase(s, gs, pgs, p, availableResources, reservedPositions);
+        availableResources = maybeBuildBarracks(s, gs, pgs, p, availableResources, reservedPositions, desiredBarracks, targetWorkers);
+        availableResources = trainCombatUnits(s, gs, availableResources);
+        availableResources = trainWorkers(s, gs, availableResources, targetWorkers);
 
-        if (opening) {
-            maybeUpdateOpeningPlan(gs, my, opp, smallMap, enemyNearBase, basePressure);
-        } else {
-            maybeUpdateMacroAction(gs, player, my, opp, smallMap, enemyNearBase, recentCombat, basePressure);
-        }
+        commandArmy(s, gs);
+        commandWorkers(s, gs, pgs, p, reservedPositions);
 
-        if (shouldUseMCTS(gs, my, opp, opening, enemyNearBase, smallMap, recentCombat)) {
-            mctsAttemptCount++;
-            if (firstMctsAttemptTime < 0) {
-                firstMctsAttemptTime = gs.getTime();
-            }
-            try {
-                PlayerAction mctsAction = tacticalMCTS.getAction(player, gs);
-                if (mctsAction != null && !mctsAction.isEmpty()) {
-                    mctsSuccessCount++;
-                    if (firstMctsSuccessTime < 0) {
-                        firstMctsSuccessTime = gs.getTime();
-                    }
-                    return mctsAction;
-                }
-            } catch (Exception ignored) {
-                // Tactical inference is optional. Fall through to scripted control immediately.
-            }
-        }
-
-        applyMacroStrategy(gs, player, my, opp, enemyNearBase, smallMap, opening);
+        debugLog(s, heuristicMode, llmMode, currentMode, targetWorkers, desiredBarracks);
         return translateActions(player, gs);
     }
 
-    // ===========================
-    // Hierarchical macro control
-    // ===========================
-    private void maybeUpdateOpeningPlan(
-            GameState gs,
-            Counts my,
-            Counts opp,
-            boolean smallMap,
-            boolean enemyNearBase,
-            float basePressure) {
+    private Snapshot analyze(int player, GameState gs, PhysicalGameState pgs) {
+        Snapshot s = new Snapshot();
+        s.player = player;
+        s.enemy = 1 - player;
+        s.time = gs.getTime();
+        s.width = pgs.getWidth();
+        s.height = pgs.getHeight();
+        s.area = s.width * s.height;
 
-        OpeningPlan next = detectOpeningPlan(gs, my, opp, smallMap, enemyNearBase, basePressure);
-        currentMacroAction = mapOpeningPlanToMacro(next);
-        lastDecisionSource = DecisionSource.OPENING;
-        lastPolicyConfidence = 0.0f;
-        lastPolicyMargin = 0.0f;
-
-        if (next != currentOpeningPlan || lastOpeningDecisionTime < 0) {
-            currentOpeningPlan = next;
-            openingDecisionCount++;
-            lastOpeningDecisionTime = gs.getTime();
-            if (DEBUG) {
-                System.err.printf(
-                        "XieBot[t=%d] opening=%s macro=%s intel(enemyBarracks=%d enemyMilitary=%d ownBarracks=%d defender=%d mcts=%d/%d@%d/%d workerLosses=%d)%n",
-                        gs.getTime(),
-                        currentOpeningPlan,
-                        currentMacroAction,
-                        firstEnemyBarracksSeenTime,
-                        firstEnemyMilitarySeenTime,
-                        firstOwnBarracksSeenTime,
-                        firstDefenderSeenTime,
-                        mctsSuccessCount,
-                        mctsAttemptCount,
-                        firstMctsAttemptTime,
-                        firstMctsSuccessTime,
-                        openingWorkerLosses
-                );
-            }
-        }
-    }
-
-    private OpeningPlan detectOpeningPlan(
-            GameState gs,
-            Counts my,
-            Counts opp,
-            boolean smallMap,
-            boolean enemyNearBase,
-            float basePressure) {
-
-        boolean enemyBarracksSeen = !opp.barracks.isEmpty();
-        boolean lowEnemyEconomy = opp.workers.size() <= 1;
-        boolean workerAggro = !enemyBarracksSeen
-                && opp.workers.size() >= 3
-                && (enemyNearBase || basePressure >= 0.45f);
-
-        if (!opp.heavy.isEmpty()) {
-            return OpeningPlan.ANTI_HEAVY_RUSH;
-        }
-        if (!opp.light.isEmpty()) {
-            return OpeningPlan.ANTI_LIGHT_RUSH;
-        }
-        if (workerAggro) {
-            return OpeningPlan.ANTI_WORKER_RUSH;
-        }
-        if (currentOpeningPlan == OpeningPlan.ANTI_WORKER_RUSH
-                || currentOpeningPlan == OpeningPlan.ANTI_LIGHT_RUSH
-                || currentOpeningPlan == OpeningPlan.ANTI_HEAVY_RUSH) {
-            return currentOpeningPlan;
-        }
-        if (smallMap && enemyBarracksSeen && lowEnemyEconomy && gs.getTime() <= 360) {
-            return OpeningPlan.ANTI_LIGHT_RUSH;
-        }
-        if (!smallMap && !enemyBarracksSeen && opp.militaryCount() == 0 && !enemyNearBase) {
-            return OpeningPlan.LARGE_MAP_BOOM;
-        }
-        return smallMap ? OpeningPlan.STANDARD_OPENING : OpeningPlan.LARGE_MAP_BOOM;
-    }
-
-    private MacroAction mapOpeningPlanToMacro(OpeningPlan openingPlan) {
-        switch (openingPlan) {
-            case ANTI_WORKER_RUSH:
-            case ANTI_LIGHT_RUSH:
-            case ANTI_HEAVY_RUSH:
-                return MacroAction.DEFEND_RUSH;
-            case LARGE_MAP_BOOM:
-                return MacroAction.ECON_BOOM;
-            default:
-                return MacroAction.STANDARD_PRESSURE;
-        }
-    }
-
-    private void maybeUpdateMacroAction(
-            GameState gs,
-            int player,
-            Counts my,
-            Counts opp,
-            boolean smallMap,
-            boolean enemyNearBase,
-            boolean recentCombat,
-            float basePressure) {
-
-        boolean emergency = isEmergencyState(gs, player, my, opp, enemyNearBase, recentCombat, basePressure);
-        int now = gs.getTime();
-
-        if (!emergency && now - lastPolicyEvaluationTime < POLICY_DECISION_INTERVAL) {
-            return;
-        }
-        if (!emergency && now - lastStrategyChangeTime < POLICY_LOCK_TICKS) {
-            return;
-        }
-
-        lastPolicyEvaluationTime = now;
-        MacroAction next = selectMacroAction(gs, player, my, opp, smallMap, enemyNearBase, recentCombat, basePressure, emergency);
-        recordDecision(now, next);
-
-        if (emergency) {
-            currentMacroAction = next;
-            lastStrategyChangeTime = now;
-            return;
-        }
-
-        if (next != currentMacroAction) {
-            currentMacroAction = next;
-            lastStrategyChangeTime = now;
-        } else if (lastStrategyChangeTime < 0) {
-            lastStrategyChangeTime = now;
-        }
-    }
-
-    private MacroAction selectMacroAction(
-            GameState gs,
-            int player,
-            Counts my,
-            Counts opp,
-            boolean smallMap,
-            boolean enemyNearBase,
-            boolean recentCombat,
-            float basePressure,
-            boolean emergency) {
-
-        if (emergency) {
-            lastPolicyConfidence = 0.0f;
-            lastPolicyMargin = 0.0f;
-            lastDecisionSource = DecisionSource.EMERGENCY;
-            return runFallbackStrategy(gs, player, my, opp, smallMap, enemyNearBase, recentCombat);
-        }
-
-        try {
-            float[] features = extractFeatures(gs, player, my, opp, enemyNearBase, recentCombat, basePressure);
-            PolicyOutput output = forwardPolicy(features);
-            lastPolicyConfidence = output.confidence;
-            lastPolicyMargin = output.margin;
-
-            if (output.confidence >= POLICY_MIN_CONFIDENCE && output.margin >= POLICY_MIN_MARGIN) {
-                lastDecisionSource = DecisionSource.POLICY;
-                return output.action;
-            }
-        } catch (Exception ignored) {
-            lastPolicyConfidence = 0.0f;
-            lastPolicyMargin = 0.0f;
-        }
-
-        lastDecisionSource = DecisionSource.FALLBACK;
-        return runFallbackStrategy(gs, player, my, opp, smallMap, enemyNearBase, recentCombat);
-    }
-
-    private void recordDecision(int now, MacroAction next) {
-        switch (lastDecisionSource) {
-            case POLICY:
-                policyDecisionCount++;
-                break;
-            case EMERGENCY:
-                emergencyDecisionCount++;
-                break;
-            default:
-                fallbackDecisionCount++;
-                break;
-        }
-
-        if (!DEBUG) {
-            return;
-        }
-
-        boolean macroChanged = next != currentMacroAction;
-        boolean firstDecision = lastDebugDecisionTime < 0;
-        if (firstDecision || macroChanged || now - lastDebugDecisionTime >= POLICY_DECISION_INTERVAL * 3) {
-            lastDebugDecisionTime = now;
-            System.err.printf(
-                    "XieBot[t=%d] macro=%s source=%s conf=%.3f margin=%.3f decisions(policy=%d fallback=%d emergency=%d) mcts=%d/%d%n",
-                    now,
-                    next,
-                    lastDecisionSource,
-                    lastPolicyConfidence,
-                    lastPolicyMargin,
-                    policyDecisionCount,
-                    fallbackDecisionCount,
-                    emergencyDecisionCount,
-                    mctsSuccessCount,
-                    mctsAttemptCount
-            );
-        }
-    }
-
-    private void applyMacroStrategy(
-            GameState gs,
-            int player,
-            Counts my,
-            Counts opp,
-            boolean enemyNearBase,
-            boolean smallMap,
-            boolean opening) {
-
-        Unit myBase = my.bases.isEmpty() ? null : my.bases.get(0);
-        Unit enemyBase = opp.bases.isEmpty() ? null : opp.bases.get(0);
-
-        handleBaseProduction(gs, player, my, opp, enemyNearBase, smallMap, opening);
-        handleBarracksProduction(gs, player, my, opp, enemyNearBase, smallMap, opening);
-        handleWorkers(gs, player, my, opp, myBase, enemyBase, enemyNearBase, smallMap, opening);
-        handleMilitary(gs, 1 - player, my, opp, myBase, enemyBase, enemyNearBase, opening);
-    }
-
-    private boolean isEmergencyState(
-            GameState gs,
-            int player,
-            Counts my,
-            Counts opp,
-            boolean enemyNearBase,
-            boolean recentCombat,
-            float basePressure) {
-
-        Player me = gs.getPlayer(player);
-        if (my.bases.isEmpty()) {
-            return true;
-        }
-        if (my.workers.isEmpty()) {
-            return true;
-        }
-        if (enemyNearBase
-                && basePressure >= 0.70f
-                && my.combatWithWorkers() + 1 < opp.combatWithWorkers()) {
-            return true;
-        }
-        if (my.workers.size() <= 1
-                && my.barracks.isEmpty()
-                && me.getResources() < barracksType.cost) {
-            return true;
-        }
-        return recentCombat && my.militaryCount() == 0 && opp.militaryCount() > 0;
-    }
-
-    private MacroAction runFallbackStrategy(
-            GameState gs,
-            int player,
-            Counts my,
-            Counts opp,
-            boolean smallMap,
-            boolean enemyNearBase,
-            boolean recentCombat) {
-
-        Player me = gs.getPlayer(player);
-
-        boolean opening = isOpeningPhase(gs, smallMap);
-
-        if (my.bases.isEmpty()) {
-            return my.militaryCount() >= Math.max(2, opp.militaryCount() - 1)
-                    ? MacroAction.STANDARD_PRESSURE
-                    : MacroAction.DEFEND_RUSH;
-        }
-        if (my.workers.isEmpty()) {
-            return MacroAction.DEFEND_RUSH;
-        }
-        if (enemyNearBase && my.combatWithWorkers() + 1 < opp.combatWithWorkers()) {
-            return MacroAction.DEFEND_RUSH;
-        }
-        if (hasRushPressure(my, opp, enemyNearBase, smallMap, opening)) {
-            return MacroAction.DEFEND_RUSH;
-        }
-        if (!smallMap
-                && !recentCombat
-                && my.workers.size() >= 6
-                && my.militaryCount() >= opp.militaryCount()
-                && me.getResources() >= barracksType.cost
-                && my.barracks.size() < 2) {
-            return MacroAction.ECON_BOOM;
-        }
-        if (!smallMap
-                && !opening
-                && !my.barracks.isEmpty()
-                && my.ranged.size() < Math.max(2, my.light.size() / 2)
-                && my.workers.size() >= 5) {
-            return MacroAction.RANGED_TRANSITION;
-        }
-        if (smallMap) {
-            if (my.militaryCount() + 1 < opp.militaryCount()) {
-                return MacroAction.DEFEND_RUSH;
-            }
-            return MacroAction.STANDARD_PRESSURE;
-        }
-        if (my.militaryCount() < opp.militaryCount()) {
-            return MacroAction.DEFEND_RUSH;
-        }
-        if (!my.barracks.isEmpty() && my.ranged.size() < Math.max(1, my.light.size() / 2)) {
-            return MacroAction.RANGED_TRANSITION;
-        }
-        return MacroAction.STANDARD_PRESSURE;
-    }
-
-    // ===========================
-    // Feature extraction + policy
-    // ===========================
-    private float[] extractFeatures(
-            GameState gs,
-            int player,
-            Counts my,
-            Counts opp,
-            boolean enemyNearBase,
-            boolean recentCombat,
-            float basePressure) {
-
-        int enemy = 1 - player;
-        float[] features = new float[FEATURE_COUNT];
-        int i = 0;
-
-        // Stable feature order for external PPO training/export.
-        features[i++] = clamp01(gs.getTime() / 4000.0f);                                   // 0 time
-        features[i++] = clamp01(gs.getPlayer(player).getResources() / 20.0f);              // 1 own res
-        features[i++] = clamp01(gs.getPlayer(enemy).getResources() / 20.0f);               // 2 enemy res estimate
-        features[i++] = clamp01(my.workers.size() / 10.0f);                                // 3 own workers
-        features[i++] = clamp01(my.light.size() / 10.0f);                                  // 4 own light
-        features[i++] = clamp01(my.ranged.size() / 8.0f);                                  // 5 own ranged
-        features[i++] = clamp01(my.heavy.size() / 6.0f);                                   // 6 own heavy
-        features[i++] = clamp01(opp.workers.size() / 10.0f);                               // 7 enemy workers
-        features[i++] = clamp01(opp.light.size() / 10.0f);                                 // 8 enemy light
-        features[i++] = clamp01(opp.ranged.size() / 8.0f);                                 // 9 enemy ranged
-        features[i++] = clamp01(opp.heavy.size() / 6.0f);                                  // 10 enemy heavy
-        features[i++] = my.bases.isEmpty() ? 0.0f : 1.0f;                                  // 11 own base alive
-        features[i++] = my.barracks.isEmpty() ? 0.0f : 1.0f;                               // 12 own barracks alive
-        features[i++] = opp.bases.isEmpty() ? 0.0f : 1.0f;                                 // 13 enemy base alive
-        features[i++] = opp.barracks.isEmpty() ? 0.0f : 1.0f;                              // 14 enemy barracks alive
-        features[i++] = normalizeSigned(my.workers.size() - opp.workers.size(), 10.0f);    // 15 worker diff
-        features[i++] = normalizeSigned(my.militaryCount() - opp.militaryCount(), 10.0f);  // 16 military diff
-        features[i++] = normalizeSigned(my.ranged.size() - opp.ranged.size(), 6.0f);       // 17 ranged diff
-        features[i++] = normalizeSigned(my.light.size() - opp.light.size(), 6.0f);         // 18 light diff
-        features[i++] = normalizeSigned(my.heavy.size() - opp.heavy.size(), 4.0f);         // 19 heavy diff
-        features[i++] = basePressure;                                                       // 20 enemy-to-base pressure
-        features[i++] = enemyNearBase ? 1.0f : 0.0f;                                        // 21 enemy near base
-        features[i++] = currentMacroAction.ordinal() / (float) Math.max(1, ACTION_COUNT - 1); // 22 current macro id
-        features[i++] = clamp01(strategyCooldown(gs.getTime()) / (float) POLICY_LOCK_TICKS);   // 23 change cooldown
-        features[i++] = recentCombat ? 1.0f : 0.0f;                                         // 24 recent combat
-
-        return features;
-    }
-
-    private PolicyOutput forwardPolicy(float[] features) {
-        float[] hidden1 = dense(features, PPO_W1, PPO_B1);
-        relu(hidden1);
-        float[] hidden2 = dense(hidden1, PPO_W2, PPO_B2);
-        relu(hidden2);
-        float[] logits = dense(hidden2, PPO_W3, PPO_B3);
-        float[] probabilities = softmax(logits);
-
-        int bestIndex = 0;
-        float best = probabilities[0];
-        float second = Float.NEGATIVE_INFINITY;
-        for (int i = 1; i < probabilities.length; i++) {
-            float value = probabilities[i];
-            if (value > best) {
-                second = best;
-                best = value;
-                bestIndex = i;
-            } else if (value > second) {
-                second = value;
-            }
-        }
-        if (second == Float.NEGATIVE_INFINITY) {
-            second = 0.0f;
-        }
-
-        return new PolicyOutput(MACRO_ACTIONS[bestIndex], best, best - second);
-    }
-
-    private float[] dense(float[] input, float[][] weights, float[] bias) {
-        float[] out = new float[bias.length];
-        for (int j = 0; j < bias.length; j++) {
-            float sum = bias[j];
-            for (int i = 0; i < input.length; i++) {
-                sum += input[i] * weights[i][j];
-            }
-            out[j] = sum;
-        }
-        return out;
-    }
-
-    private void relu(float[] values) {
-        for (int i = 0; i < values.length; i++) {
-            if (values[i] < 0.0f) {
-                values[i] = 0.0f;
-            }
-        }
-    }
-
-    private float[] softmax(float[] logits) {
-        float max = logits[0];
-        for (int i = 1; i < logits.length; i++) {
-            if (logits[i] > max) {
-                max = logits[i];
-            }
-        }
-
-        float sum = 0.0f;
-        float[] out = new float[logits.length];
-        for (int i = 0; i < logits.length; i++) {
-            out[i] = (float) Math.exp(logits[i] - max);
-            sum += out[i];
-        }
-        if (sum <= 0.0f) {
-            return out;
-        }
-        for (int i = 0; i < out.length; i++) {
-            out[i] /= sum;
-        }
-        return out;
-    }
-
-    // ===========================
-    // Deterministic production
-    // ===========================
-    private void handleBaseProduction(GameState gs, int player, Counts my, Counts opp, boolean enemyNearBase, boolean smallMap, boolean opening) {
-        Player me = gs.getPlayer(player);
-        int desiredWorkers = desiredWorkerCount(my, opp, enemyNearBase, smallMap, opening);
-
-        for (Unit base : my.bases) {
-            if (!isIdle(gs, base)) {
-                continue;
-            }
-            if (my.workers.size() < desiredWorkers && me.getResources() >= workerType.cost) {
-                train(base, workerType);
-                // Conservative accounting to avoid over-issuing train orders in the same cycle.
-                my.workers.add(new Unit(-1, workerType, 0, 0));
-            }
-        }
-    }
-
-    private int desiredWorkerCount(Counts my, Counts opp, boolean enemyNearBase, boolean smallMap, boolean opening) {
-        if (opening) {
-            switch (currentOpeningPlan) {
-                case ANTI_WORKER_RUSH:
-                    return smallMap ? 4 : 5;
-                case ANTI_LIGHT_RUSH:
-                    return smallMap ? 3 : 4;
-                case ANTI_HEAVY_RUSH:
-                    return smallMap ? 4 : 5;
-                case LARGE_MAP_BOOM:
-                    return smallMap ? 4 : 7;
-                default:
-                    return smallMap ? 4 : 6;
-            }
-        }
-
-        int desired = smallMap ? (opening ? 4 : 5) : (opening ? 6 : 7);
-        boolean rushPressure = hasRushPressure(my, opp, enemyNearBase, smallMap, opening);
-
-        if (currentMacroAction.prefersRanged()) {
-            desired += 1;
-        }
-        if (currentMacroAction.prefersEconomy()) {
-            desired += smallMap ? 0 : 2;
-        }
-        if (currentMacroAction.prefersDefense()) {
-            desired += 1;
-        }
-        if (currentMacroAction.prefersPressure() && smallMap) {
-            desired -= 1;
-        }
-        if (enemyNearBase && my.militaryCount() <= 1) {
-            desired = Math.max(desired, 6);
-        }
-        if (rushPressure) {
-            desired = Math.min(desired, smallMap ? 4 : 5);
-            if (!opp.heavy.isEmpty()) {
-                desired = Math.min(desired, 4);
-            }
-        }
-
-        return clampInt(desired, 2, smallMap ? 6 : 9);
-    }
-
-    private void handleBarracksProduction(
-            GameState gs,
-            int player,
-            Counts my,
-            Counts opp,
-            boolean enemyNearBase,
-            boolean smallMap,
-            boolean opening) {
-
-        Player me = gs.getPlayer(player);
-        for (Unit barracks : my.barracks) {
-            if (!isIdle(gs, barracks)) {
+        for (Unit u : pgs.getUnits()) {
+            if (u.getType().isResource) {
+                s.resources.add(u);
                 continue;
             }
 
-            UnitType chosen = chooseBarracksUnit(my, opp, enemyNearBase, smallMap, opening);
-            if (chosen != null && me.getResources() >= chosen.cost) {
-                train(barracks, chosen);
-            }
-        }
-    }
-
-    private UnitType chooseBarracksUnit(Counts my, Counts opp, boolean enemyNearBase, boolean smallMap, boolean opening) {
-        if (opening) {
-            switch (currentOpeningPlan) {
-                case ANTI_WORKER_RUSH:
-                case ANTI_LIGHT_RUSH:
-                case ANTI_HEAVY_RUSH:
-                case STANDARD_OPENING:
-                    return lightType;
-                case LARGE_MAP_BOOM:
-                    if (!smallMap && my.light.size() >= 2 && my.ranged.size() < 1) {
-                        return rangedType;
-                    }
-                    return lightType;
-                default:
-                    return lightType;
-            }
-        }
-
-        boolean rushPressure = hasRushPressure(my, opp, enemyNearBase, smallMap, opening);
-        if (enemyNearBase && my.combatWithWorkers() + 1 < opp.combatWithWorkers()) {
-            return lightType;
-        }
-        if (rushPressure) {
-            return lightType;
-        }
-        if (currentMacroAction.prefersDefense()) {
-            return lightType;
-        }
-        if (smallMap) {
-            return lightType;
-        }
-        if (currentMacroAction.prefersEconomy()) {
-            if (my.light.size() < 4) {
-                return lightType;
-            }
-            if (!opening && my.ranged.size() < Math.max(2, my.light.size() / 2)) {
-                return rangedType;
-            }
-            return lightType;
-        }
-        if (currentMacroAction.prefersRanged() && !opening) {
-            if (my.ranged.size() <= my.light.size()) {
-                return rangedType;
-            }
-        }
-        if (!opening && my.ranged.size() < Math.max(2, my.light.size() / 2) && my.light.size() >= 4) {
-            return rangedType;
-        }
-        return lightType;
-    }
-
-    // ===========================
-    // Worker manager (economy + defense + build timing)
-    // ===========================
-    private void handleWorkers(
-            GameState gs,
-            int player,
-            Counts my,
-            Counts opp,
-            Unit myBase,
-            Unit enemyBase,
-            boolean enemyNearBase,
-            boolean smallMap,
-            boolean opening) {
-
-        Player me = gs.getPlayer(player);
-        int enemy = 1 - player;
-        boolean defensiveOpening = opening
-                && (currentOpeningPlan == OpeningPlan.ANTI_WORKER_RUSH
-                || currentOpeningPlan == OpeningPlan.ANTI_LIGHT_RUSH
-                || currentOpeningPlan == OpeningPlan.ANTI_HEAVY_RUSH);
-
-        List<Unit> idleWorkers = new ArrayList<>();
-        for (Unit w : my.workers) {
-            if (isIdle(gs, w)) {
-                idleWorkers.add(w);
-            }
-        }
-
-        if (enemyNearBase && my.militaryCount() <= 1) {
-            for (Unit w : idleWorkers) {
-                Unit threat = nearestEnemy(gs.getPhysicalGameState(), w, enemy);
-                if (threat != null) {
-                    attack(w, threat);
+            if (u.getPlayer() == player) {
+                addOwnUnit(s, u);
+                UnitAction ua = gs.getUnitAction(u);
+                if (ua != null && ua.getType() == UnitAction.TYPE_PRODUCE && ua.getUnitType() != null) {
+                    countPendingOwnProduction(s, ua.getUnitType());
                 }
-            }
-            return;
-        }
-
-        if (shouldBuildBarracks(gs, player, my, smallMap, opening, enemyNearBase)
-                && me.getResources() >= barracksType.cost
-                && !idleWorkers.isEmpty()) {
-            Unit builder = selectBuilder(idleWorkers, myBase);
-            int[] site = chooseBarracksSite(gs.getPhysicalGameState(), myBase != null ? myBase : builder, enemy);
-            if (builder != null && site != null) {
-                build(builder, barracksType, site[0], site[1]);
-                idleWorkers.remove(builder);
+            } else if (u.getPlayer() >= 0) {
+                addEnemyUnit(s, u);
             }
         }
 
-        int harvestersWanted = desiredHarvesterCount(my, opp, enemyNearBase, smallMap, opening);
-        harvestersWanted = Math.min(harvestersWanted, Math.max(0, my.workers.size() - 1));
+        s.mainBase = closestToCenter(s.ownBases, s.width, s.height);
+        s.enemyBase = closestToCenter(s.enemyBases, s.width, s.height);
+        s.mapClass = classifyMap(s);
+        s.enemyThreats = findEnemyThreats(s);
+        return s;
+    }
 
-        List<Unit> resources = listResources(gs.getPhysicalGameState());
-        int assigned = 0;
-        for (Unit w : idleWorkers) {
-            if (assigned >= harvestersWanted) {
-                break;
-            }
-            Unit nearestRes = nearestResource(gs.getPhysicalGameState(), w, resources);
-            if (nearestRes != null && myBase != null) {
-                harvest(w, nearestRes, myBase);
-                assigned++;
+    private void addOwnUnit(Snapshot s, Unit u) {
+        if (u.getType() == workerType) {
+            s.ownWorkers.add(u);
+        } else if (u.getType() == baseType) {
+            s.ownBases.add(u);
+        } else if (u.getType() == barracksType) {
+            s.ownBarracks.add(u);
+        } else if (isMilitary(u)) {
+            s.ownArmy.add(u);
+            if (u.getType() == lightType) {
+                s.ownLights++;
+            } else if (u.getType() == rangedType) {
+                s.ownRanged++;
+            } else if (u.getType() == heavyType) {
+                s.ownHeavy++;
             }
         }
+    }
 
-        for (Unit w : idleWorkers) {
-            if (!isIdle(gs, w)) {
+    private void addEnemyUnit(Snapshot s, Unit u) {
+        s.enemyUnits.add(u);
+        if (u.getType() == workerType) {
+            s.enemyWorkers.add(u);
+        } else if (u.getType() == baseType) {
+            s.enemyBases.add(u);
+        } else if (u.getType() == barracksType) {
+            s.enemyBarracks.add(u);
+        } else if (isMilitary(u)) {
+            s.enemyArmy.add(u);
+        }
+    }
+
+    private void countPendingOwnProduction(Snapshot s, UnitType type) {
+        if (type == workerType) {
+            s.pendingWorkers++;
+        } else if (type == baseType) {
+            s.pendingBases++;
+        } else if (type == barracksType) {
+            s.pendingBarracks++;
+        } else if (type == lightType) {
+            s.pendingLights++;
+        } else if (type == rangedType) {
+            s.pendingRanged++;
+        }
+    }
+
+    private MapClass classifyMap(Snapshot s) {
+        int baseDistance = distance(s.mainBase, s.enemyBase);
+        if (s.area <= 144 || s.width <= 12 || s.height <= 12 || (baseDistance > 0 && baseDistance <= 16)) {
+            return MapClass.SMALL;
+        }
+        if (s.area <= 576 || (baseDistance > 0 && baseDistance <= 32)) {
+            return MapClass.MEDIUM;
+        }
+        return MapClass.LARGE;
+    }
+
+    private List<Unit> findEnemyThreats(Snapshot s) {
+        List<Unit> threats = new ArrayList<>();
+        for (Unit enemy : s.enemyUnits) {
+            if (!enemy.getType().canAttack || !enemy.getType().canMove) {
                 continue;
             }
-
-            if (currentMacroAction.prefersEconomy() && myBase != null) {
-                Unit extraRes = nearestResource(gs.getPhysicalGameState(), w, resources);
-                if (extraRes != null && !enemyNearBase) {
-                    harvest(w, extraRes, myBase);
-                    continue;
-                }
-            }
-
-            Unit target = null;
-            if (enemyNearBase || currentMacroAction.prefersDefense() || defensiveOpening) {
-                target = nearestEnemy(gs.getPhysicalGameState(), w, enemy);
-            } else if (opening && currentOpeningPlan == OpeningPlan.LARGE_MAP_BOOM && myBase != null) {
-                Unit extraRes = nearestResource(gs.getPhysicalGameState(), w, resources);
-                if (extraRes != null) {
-                    harvest(w, extraRes, myBase);
-                    continue;
-                }
-            } else if (my.militaryCount() < 3 || myBase == null) {
-                target = nearestEnemyWithin(gs.getPhysicalGameState(), w, enemy, DEFENSE_RADIUS);
-            } else if (enemyBase != null) {
-                target = enemyBase;
+            int radius;
+            if (enemy.getType() == workerType) {
+                radius = s.mapClass == MapClass.SMALL ? 2 : 3;
             } else {
-                target = nearestEnemy(gs.getPhysicalGameState(), w, enemy);
+                radius = s.mapClass == MapClass.SMALL ? 4 : (s.mapClass == MapClass.MEDIUM ? 6 : 8);
             }
-
-            if (target != null) {
-                attack(w, target);
-            }
-        }
-    }
-
-    private int desiredHarvesterCount(Counts my, Counts opp, boolean enemyNearBase, boolean smallMap, boolean opening) {
-        if (opening) {
-            switch (currentOpeningPlan) {
-                case ANTI_WORKER_RUSH:
-                case ANTI_LIGHT_RUSH:
-                    return 1;
-                case ANTI_HEAVY_RUSH:
-                    return smallMap ? 2 : 3;
-                case LARGE_MAP_BOOM:
-                    return smallMap ? 2 : 4;
-                default:
-                    return smallMap ? 2 : 3;
+            if (distanceToClosest(enemy, s.ownBases) <= radius || distanceToClosest(enemy, s.ownBarracks) <= radius) {
+                threats.add(enemy);
             }
         }
-
-        int harvesters = smallMap ? 2 : (opening ? 4 : 3);
-        boolean rushPressure = hasRushPressure(my, opp, enemyNearBase, smallMap, opening);
-
-        if (currentMacroAction.prefersEconomy()) {
-            harvesters += smallMap ? 0 : 2;
-        }
-        if (currentMacroAction.prefersRanged()) {
-            harvesters += 1;
-        }
-        if (currentMacroAction.prefersPressure()) {
-            harvesters -= 1;
-        }
-        if (enemyNearBase) {
-            harvesters = Math.max(1, harvesters - 1);
-        }
-        if (my.barracks.size() >= 2 && !smallMap) {
-            harvesters = Math.min(harvesters + 1, 5);
-        }
-        if (rushPressure) {
-            harvesters = Math.min(harvesters, 2);
-        }
-
-        return clampInt(harvesters, 1, smallMap ? 3 : 5);
+        threats.sort(Comparator.comparingInt(u -> distanceToClosest(u, s.ownBases)));
+        return threats;
     }
 
-    private boolean shouldBuildBarracks(GameState gs, int player, Counts my, boolean smallMap, boolean opening, boolean enemyNearBase) {
-        if (my.barracks.isEmpty()) {
-            return !my.workers.isEmpty();
+    private MacroMode chooseHeuristicMode(Snapshot s) {
+        if (s.mapClass == MapClass.SMALL) {
+            return MacroMode.RUSH;
         }
-        if (smallMap || opening || enemyNearBase) {
-            return false;
+        if (s.isUnderThreat()) {
+            return MacroMode.BALANCED;
         }
-        if (my.barracks.size() >= 2) {
-            return false;
+        if (hasArmyAdvantage(s)) {
+            return MacroMode.RUSH;
         }
-
-        Player me = gs.getPlayer(player);
-        if (currentMacroAction.prefersDefense()) {
-            return my.workers.size() >= 6 && my.militaryCount() >= 6 && me.getResources() >= barracksType.cost;
+        if (s.mapClass == MapClass.LARGE && s.time < 1000 && s.totalWorkers() < 6) {
+            return MacroMode.ECON;
         }
-        if (currentMacroAction.prefersEconomy()) {
-            return my.workers.size() >= 5 && me.getResources() >= barracksType.cost;
-        }
-        return my.workers.size() >= 5 && my.militaryCount() >= 4 && me.getResources() >= barracksType.cost;
+        return MacroMode.BALANCED;
     }
 
-    // ===========================
-    // Military execution
-    // ===========================
-    private void handleMilitary(
+    private MacroMode chooseFinalMode(Snapshot s, MacroMode heuristicMode, MacroMode llmMode) {
+        if (s.mapClass == MapClass.SMALL) {
+            return MacroMode.RUSH;
+        }
+        if (s.isUnderThreat()) {
+            return MacroMode.BALANCED;
+        }
+        if (hasArmyAdvantage(s)) {
+            return MacroMode.RUSH;
+        }
+        if (llmMode == null) {
+            return heuristicMode;
+        }
+        if (llmMode == MacroMode.ECON && s.enemyArmy.size() > s.ownArmy.size() + 1) {
+            return MacroMode.BALANCED;
+        }
+        if (llmMode == MacroMode.RUSH && s.ownArmy.size() < 2 && s.time < 700) {
+            return heuristicMode;
+        }
+        return llmMode;
+    }
+
+    private int targetWorkers(Snapshot s, MacroMode mode) {
+        if (s.mapClass == MapClass.SMALL) {
+            if (mode == MacroMode.RUSH) {
+                if (s.time > 250 && s.enemyBarracks.isEmpty() && s.enemyArmy.isEmpty()) {
+                    return 4;
+                }
+                return 1;
+            }
+            return 5;
+        }
+        if (s.mapClass == MapClass.MEDIUM) {
+            return mode == MacroMode.ECON ? 6 : 5;
+        }
+        if (mode == MacroMode.RUSH) {
+            return 5;
+        }
+        return mode == MacroMode.ECON ? 7 : 6;
+    }
+
+    private int desiredBarracks(Snapshot s, MacroMode mode, int targetWorkers) {
+        if (s.mapClass == MapClass.LARGE
+                && mode == MacroMode.ECON
+                && s.time > 700
+                && s.totalWorkers() >= targetWorkers) {
+            return 2;
+        }
+        return 1;
+    }
+
+    private int maybeBuildReplacementBase(
+            Snapshot s,
             GameState gs,
-            int enemy,
-            Counts my,
-            Counts opp,
-            Unit myBase,
-            Unit enemyBase,
-            boolean enemyNearBase,
-            boolean opening) {
+            PhysicalGameState pgs,
+            Player p,
+            int availableResources,
+            List<Integer> reservedPositions) {
+        if (s.totalBases() > 0 || availableResources < baseType.cost || s.ownWorkers.isEmpty()) {
+            return availableResources;
+        }
 
-        List<Unit> army = new ArrayList<>();
-        army.addAll(my.light);
-        army.addAll(my.ranged);
-        army.addAll(my.heavy);
-        boolean defensiveOpening = opening && isOpeningPlanDefensive();
+        Unit builder = closestIdleWorkerToAny(s.ownWorkers, s.resources, gs, false);
+        if (builder == null) {
+            return availableResources;
+        }
 
-        boolean urgentDefense = enemyNearBase
-                || defensiveOpening
-                || currentMacroAction.prefersDefense()
-                || (currentMacroAction.prefersEconomy() && my.militaryCount() < 5);
+        Unit anchor = closestUnit(builder, s.resources);
+        if (anchor == null) {
+            anchor = builder;
+        }
+        int pos = findBuildPosition(gs, pgs, anchor.getX(), anchor.getY(), reservedPositions);
+        if (pos >= 0 && canCommand(builder, gs)) {
+            build(builder, baseType, pos % pgs.getWidth(), pos / pgs.getWidth());
+            reservedPositions.add(pos);
+            return availableResources - baseType.cost;
+        }
+        return availableResources;
+    }
 
-        for (Unit unit : army) {
-            if (!isIdle(gs, unit)) {
+    private int maybeBuildBarracks(
+            Snapshot s,
+            GameState gs,
+            PhysicalGameState pgs,
+            Player p,
+            int availableResources,
+            List<Integer> reservedPositions,
+            int desiredBarracks,
+            int targetWorkers) {
+        if (s.totalBarracks() >= desiredBarracks || availableResources < barracksType.cost || s.ownWorkers.isEmpty()) {
+            return availableResources;
+        }
+
+        boolean firstBarracks = s.totalBarracks() == 0;
+        if (s.mapClass == MapClass.SMALL && !firstBarracks && s.isUnderThreat() && !s.enemyArmy.isEmpty()) {
+            return availableResources;
+        }
+
+        int minWorkersBeforeFirstBarracks = s.mapClass == MapClass.SMALL ? 3 : 3;
+        if (firstBarracks
+                && s.mapClass != MapClass.SMALL
+                && s.ownWorkers.size() < minWorkersBeforeFirstBarracks
+                && s.time < 220) {
+            return availableResources;
+        }
+        if (firstBarracks
+                && s.mapClass != MapClass.SMALL
+                && availableResources < barracksType.cost + lightType.cost
+                && s.time < 220) {
+            return availableResources;
+        }
+        if (!firstBarracks
+                && (s.totalWorkers() < targetWorkers || availableResources < barracksType.cost + lightType.cost + workerType.cost)) {
+            return availableResources;
+        }
+
+        Unit anchor = s.mainBase != null ? s.mainBase : s.ownWorkers.get(0);
+        Unit builder = closestIdleWorkerTo(anchor, s.ownWorkers, gs, true);
+        if (builder == null) {
+            return availableResources;
+        }
+
+        int desiredX = anchor.getX();
+        int desiredY = anchor.getY();
+        if (s.enemyBase != null) {
+            desiredX += Integer.compare(s.enemyBase.getX(), anchor.getX());
+            desiredY += Integer.compare(s.enemyBase.getY(), anchor.getY());
+        }
+
+        int pos = findBuildPosition(gs, pgs, desiredX, desiredY, reservedPositions);
+        if (pos >= 0 && canCommand(builder, gs)) {
+            build(builder, barracksType, pos % pgs.getWidth(), pos / pgs.getWidth());
+            reservedPositions.add(pos);
+            return availableResources - barracksType.cost;
+        }
+        return availableResources;
+    }
+
+    private int trainCombatUnits(Snapshot s, GameState gs, int availableResources) {
+        for (Unit barracks : s.ownBarracks) {
+            if (!canCommand(barracks, gs) || !hasFreeAdjacent(barracks, gs)) {
                 continue;
             }
 
-            Unit target = selectCombatTarget(gs.getPhysicalGameState(), unit, enemy, myBase, urgentDefense, opp);
-            if (target == null && enemyBase != null && !defensiveOpening) {
-                if (currentMacroAction.attacksWhenStable()
-                        || (currentMacroAction.prefersEconomy() && my.militaryCount() >= 5)) {
-                    target = enemyBase;
+            UnitType unitToTrain = chooseCombatUnit(s);
+            if (availableResources >= unitToTrain.cost) {
+                train(barracks, unitToTrain);
+                availableResources -= unitToTrain.cost;
+                if (unitToTrain == lightType) {
+                    s.pendingLights++;
+                } else if (unitToTrain == rangedType) {
+                    s.pendingRanged++;
                 }
             }
+        }
+        return availableResources;
+    }
+
+    private UnitType chooseCombatUnit(Snapshot s) {
+        int lights = s.ownLights + s.pendingLights;
+        int ranged = s.ownRanged + s.pendingRanged;
+        boolean mixRanged = s.mapClass != MapClass.SMALL
+                && currentMode != MacroMode.RUSH
+                && !s.isUnderThreat()
+                && lights >= 4
+                && ranged * 3 < lights;
+        return mixRanged ? rangedType : lightType;
+    }
+
+    private int trainWorkers(Snapshot s, GameState gs, int availableResources, int targetWorkers) {
+        int workersPlanned = s.totalWorkers();
+        if (workersPlanned >= targetWorkers) {
+            return availableResources;
+        }
+
+        int minWorkersBeforeFirstBarracks = s.mapClass == MapClass.SMALL ? 3 : 3;
+        boolean saveForFirstBarracks = s.totalBarracks() == 0
+                && workersPlanned >= minWorkersBeforeFirstBarracks
+                && availableResources < barracksType.cost + workerType.cost;
+        if (saveForFirstBarracks) {
+            return availableResources;
+        }
+
+        int plannedArmy = s.ownArmy.size() + s.pendingLights + s.pendingRanged;
+        boolean saveForFirstLight = s.totalBarracks() > 0
+                && workersPlanned >= 2
+                && plannedArmy < (s.isUnderThreat() ? 2 : 1)
+                && availableResources < lightType.cost + workerType.cost;
+        if (saveForFirstLight) {
+            return availableResources;
+        }
+
+        for (Unit base : s.ownBases) {
+            if (workersPlanned >= targetWorkers || availableResources < workerType.cost) {
+                break;
+            }
+            if (canCommand(base, gs) && hasFreeAdjacent(base, gs)) {
+                train(base, workerType);
+                availableResources -= workerType.cost;
+                workersPlanned++;
+                s.pendingWorkers++;
+            }
+        }
+        return availableResources;
+    }
+
+    private void commandArmy(Snapshot s, GameState gs) {
+        if (s.ownArmy.isEmpty()) {
+            return;
+        }
+
+        if (s.isUnderThreat()) {
+            for (Unit u : s.ownArmy) {
+                Unit target = closestUnit(u, s.enemyThreats);
+                if (target != null && canCommand(u, gs)) {
+                    attack(u, target);
+                }
+            }
+            return;
+        }
+
+        int threshold = attackThreshold(s, currentMode);
+        boolean shouldAttack = s.ownArmy.size() >= threshold || hasArmyAdvantage(s);
+        if (shouldAttack) {
+            Unit target = chooseGlobalAttackTarget(s);
             if (target != null) {
-                attack(unit, target);
+                for (Unit u : s.ownArmy) {
+                    if (canCommand(u, gs)) {
+                        attack(u, target);
+                    }
+                }
+                return;
+            }
+        }
+
+        int[] rally = rallyPoint(s);
+        for (Unit u : s.ownArmy) {
+            if (canCommand(u, gs) && distance(u.getX(), u.getY(), rally[0], rally[1]) > 2) {
+                move(u, rally[0], rally[1]);
             }
         }
     }
 
-    private Unit selectCombatTarget(PhysicalGameState pgs, Unit attacker, int enemy, Unit myBase, boolean urgentDefense, Counts opp) {
-        List<Unit> enemies = new ArrayList<>();
-        for (Unit u : pgs.getUnits()) {
-            if (u.getPlayer() == enemy) {
-                enemies.add(u);
-            }
+    private int attackThreshold(Snapshot s, MacroMode mode) {
+        if (s.mapClass == MapClass.SMALL) {
+            return mode == MacroMode.RUSH ? 1 : 2;
         }
-        if (enemies.isEmpty()) {
-            return null;
+        if (s.mapClass == MapClass.MEDIUM) {
+            return mode == MacroMode.RUSH ? 3 : (mode == MacroMode.ECON ? 5 : 4);
         }
-
-        enemies.sort(Comparator.comparingInt(e -> targetScore(attacker, e, myBase, urgentDefense, opp)));
-        return enemies.get(0);
+        return mode == MacroMode.RUSH ? 4 : (mode == MacroMode.ECON ? 6 : 5);
     }
 
-    private int targetScore(Unit attacker, Unit target, Unit myBase, boolean urgentDefense, Counts opp) {
-        int d = manhattan(attacker, target);
-        int typeBias;
-
-        if (target.getType() == workerType) {
-            typeBias = (opp.workers.size() <= 2) ? 1 : 5;
-        } else if (target.getType() == lightType || target.getType() == rangedType || target.getType() == heavyType) {
-            typeBias = 3;
-        } else if (target.getType() == barracksType) {
-            typeBias = 7;
-        } else if (target.getType() == baseType) {
-            typeBias = 9;
-        } else {
-            typeBias = 6;
+    private Unit chooseGlobalAttackTarget(Snapshot s) {
+        int[] center = armyCenter(s);
+        Unit nearbyMilitary = closestWithin(center[0], center[1], s.enemyArmy, 8);
+        if (nearbyMilitary != null) {
+            return nearbyMilitary;
         }
-
-        if (urgentDefense && target.getType().canAttack) {
-            typeBias -= 2;
+        Unit worker = closestUnit(center[0], center[1], s.enemyWorkers);
+        if (worker != null && (s.enemyBarracks.isEmpty() && s.enemyBases.isEmpty()
+                || distance(center[0], center[1], worker.getX(), worker.getY()) <= 5
+                || hasArmyAdvantage(s))) {
+            return worker;
         }
-        if (currentMacroAction.prefersPressure() && target.getType() == baseType) {
-            typeBias -= 2;
+        Unit barracks = closestUnit(center[0], center[1], s.enemyBarracks);
+        if (barracks != null) {
+            return barracks;
         }
-        if (currentMacroAction.prefersRanged() && target.getType() == rangedType) {
-            typeBias -= 1;
+        Unit base = closestUnit(center[0], center[1], s.enemyBases);
+        if (base != null) {
+            return base;
         }
-        if (currentMacroAction.prefersEconomy() && target.getType().canAttack) {
-            typeBias -= 2;
+        if (worker != null) {
+            return worker;
         }
-
-        int baseProximity = 0;
-        if (myBase != null) {
-            baseProximity = manhattan(myBase, target);
-        }
-
-        return d * 3 + typeBias + (urgentDefense ? baseProximity * 2 : 0);
+        return closestUnit(center[0], center[1], s.enemyUnits);
     }
 
-    // ===========================
-    // Tactical MCTS gating
-    // ===========================
-    private boolean shouldUseMCTS(
+    private void commandWorkers(
+            Snapshot s,
             GameState gs,
-            Counts my,
-            Counts opp,
-            boolean opening,
-            boolean enemyNearBase,
-            boolean smallMap,
-            boolean recentCombat) {
-
-        if (my.bases.isEmpty() || my.workers.size() < 1) {
-            return false;
-        }
-        boolean criticalOpeningDefense = opening
-                && isOpeningPlanDefensive()
-                && enemyNearBase
-                && my.combatWithWorkers() >= Math.max(2, opp.combatWithWorkers() - 1);
-
-        if (enemyNearBase && my.militaryCount() <= 1 && !criticalOpeningDefense) {
-            return false;
+            PhysicalGameState pgs,
+            Player p,
+            List<Integer> reservedPositions) {
+        List<Unit> idleWorkers = new ArrayList<>();
+        for (Unit worker : s.ownWorkers) {
+            if (canCommand(worker, gs)) {
+                idleWorkers.add(worker);
+            }
         }
 
-        int myArmy = my.militaryCount();
-        int oppArmy = opp.militaryCount();
+        pullDefendingWorkers(s, gs, idleWorkers);
 
-        boolean baseDefenseFight = enemyNearBase && myArmy >= 2 && opp.combatWithWorkers() >= 2;
-        boolean balancedSkirmish = recentCombat && myArmy >= 3 && oppArmy >= 3 && Math.abs(myArmy - oppArmy) <= 3;
-        boolean denseFight = recentCombat && myArmy + oppArmy >= 8 && Math.abs(myArmy - oppArmy) <= 4;
-        boolean openingDefenseFight = opening && enemyNearBase && my.combatWithWorkers() >= opp.combatWithWorkers() - 1;
-
-        if (opening && !baseDefenseFight && !openingDefenseFight && !criticalOpeningDefense) {
-            return false;
-        }
-        if (smallMap && gs.getTime() < SMALL_MAP_OPENING_TICKS && !baseDefenseFight && !balancedSkirmish && !criticalOpeningDefense) {
-            return false;
-        }
-        return baseDefenseFight || openingDefenseFight || balancedSkirmish || denseFight || criticalOpeningDefense;
-    }
-
-    // ===========================
-    // Geometry / state helpers
-    // ===========================
-    private boolean isIdle(GameState gs, Unit u) {
-        return gs.getActionAssignment(u) == null;
-    }
-
-    private boolean isEnemyNearBase(PhysicalGameState pgs, Counts my, int enemy, int radius) {
-        if (my.bases.isEmpty()) {
-            return false;
-        }
-        Unit base = my.bases.get(0);
-        for (Unit u : pgs.getUnits()) {
-            if (u.getPlayer() != enemy) {
+        Unit closestBase = null;
+        Unit closestResource = null;
+        for (Unit worker : idleWorkers) {
+            if (!canCommand(worker, gs)) {
                 continue;
             }
-            if (!u.getType().canAttack && u.getType() != workerType) {
-                continue;
+            closestBase = closestUnit(worker, s.ownBases);
+            closestResource = closestBase != null ? closestUnit(closestBase, s.resources) : closestUnit(worker, s.resources);
+            if (closestBase != null && closestResource != null) {
+                harvest(worker, closestResource, closestBase);
+            } else if (s.ownArmy.size() >= s.enemyArmy.size() + 4 && !s.enemyUnits.isEmpty()) {
+                Unit target = chooseGlobalAttackTarget(s);
+                if (target != null) {
+                    attack(worker, target);
+                }
             }
-            if (manhattan(base, u) <= radius) {
+        }
+    }
+
+    private void pullDefendingWorkers(Snapshot s, GameState gs, List<Unit> idleWorkers) {
+        if (!s.isUnderThreat() || idleWorkers.isEmpty()) {
+            return;
+        }
+
+        boolean severeThreat = hasSevereStructureThreat(s);
+        int needed = s.enemyThreats.size() - s.ownArmy.size();
+        if (needed <= 0 && !severeThreat) {
+            return;
+        }
+        if (needed <= 0) {
+            needed = 1;
+        }
+        boolean immediateSmallMapDefense = s.mapClass == MapClass.SMALL && s.ownArmy.isEmpty();
+        int leaveHarvesters = immediateSmallMapDefense ? 0 : (idleWorkers.size() > 1 ? 1 : 0);
+        int pullCount = Math.min(3, Math.min(needed, idleWorkers.size() - leaveHarvesters));
+        if (pullCount <= 0) {
+            return;
+        }
+
+        Unit anchor = s.mainBase != null ? s.mainBase : idleWorkers.get(0);
+        int emptyHanded = 0;
+        for (Unit worker : idleWorkers) {
+            if (worker.getResources() == 0) {
+                emptyHanded++;
+            }
+        }
+        if (emptyHanded > 0) {
+            pullCount = Math.min(pullCount, emptyHanded);
+        }
+
+        idleWorkers.sort(Comparator.comparingInt(w -> distance(w, anchor) + (w.getResources() > 0 ? 1000 : 0)));
+        for (int i = 0; i < pullCount; i++) {
+            Unit worker = idleWorkers.get(i);
+            Unit target = closestUnit(worker, s.enemyThreats);
+            if (target != null && canCommand(worker, gs)) {
+                attack(worker, target);
+            }
+        }
+    }
+
+    private boolean hasSevereStructureThreat(Snapshot s) {
+        for (Unit enemy : s.enemyThreats) {
+            if (distanceToClosest(enemy, s.ownBases) <= 1 || distanceToClosest(enemy, s.ownBarracks) <= 1) {
                 return true;
             }
         }
         return false;
     }
 
-    private float basePressureIndicator(PhysicalGameState pgs, Counts my, int enemy) {
-        if (my.bases.isEmpty()) {
-            return 1.0f;
+    private int[] rallyPoint(Snapshot s) {
+        Unit anchor = s.mainBase != null ? s.mainBase : closestToCenter(s.ownWorkers, s.width, s.height);
+        if (anchor == null) {
+            return new int[] {s.width / 2, s.height / 2};
         }
-        Unit base = my.bases.get(0);
-        int best = Integer.MAX_VALUE;
-        for (Unit u : pgs.getUnits()) {
-            if (u.getPlayer() != enemy) {
-                continue;
-            }
-            if (!u.getType().canAttack && u.getType() != workerType) {
-                continue;
-            }
-            int d = manhattan(base, u);
-            if (d < best) {
-                best = d;
-            }
+
+        Unit target = s.enemyBase != null ? s.enemyBase : closestToCenter(s.enemyUnits, s.width, s.height);
+        if (target == null) {
+            return new int[] {anchor.getX(), anchor.getY()};
         }
-        if (best == Integer.MAX_VALUE) {
-            return 0.0f;
+
+        int x = anchor.getX();
+        int y = anchor.getY();
+        int steps = s.mapClass == MapClass.SMALL ? 2 : 4;
+        for (int i = 0; i < steps; i++) {
+            x += Integer.compare(target.getX(), x);
+            y += Integer.compare(target.getY(), y);
         }
-        float dangerDistance = Math.max(6.0f, (pgs.getWidth() + pgs.getHeight()) / 3.0f);
-        return 1.0f - clamp01(best / dangerDistance);
+        return new int[] {clamp(x, 0, s.width - 1), clamp(y, 0, s.height - 1)};
     }
 
-    private boolean isCombatHappening(PhysicalGameState pgs, Counts my, int enemy) {
-        for (Unit ally : my.mobileUnits()) {
-            for (Unit foe : pgs.getUnits()) {
-                if (foe.getPlayer() != enemy) {
-                    continue;
-                }
-                if (!foe.getType().canAttack && foe.getType() != workerType) {
-                    continue;
-                }
-                int engagementDistance = Math.max(ally.getAttackRange(), foe.getAttackRange()) + 2;
-                if (manhattan(ally, foe) <= engagementDistance) {
-                    return true;
-                }
+    private MacroMode maybeAskLlm(Snapshot s, MacroMode heuristicMode) {
+        if (s.time < LLM_OPENING_TICKS || s.time - lastLlmQueryTime < LLM_INTERVAL_TICKS) {
+            return lastLlmMode;
+        }
+        lastLlmQueryTime = s.time;
+
+        String host = envOrDefault("OLLAMA_HOST", DEFAULT_OLLAMA_HOST);
+        String model = envOrDefault("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL);
+        try {
+            String response = postOllama(host, model, buildPrompt(s, heuristicMode));
+            MacroMode parsed = parseMacroMode(response);
+            if (parsed != null) {
+                lastLlmMode = parsed;
+                return parsed;
+            }
+            llmFailures++;
+        } catch (Exception e) {
+            llmFailures++;
+        }
+        lastLlmMode = null;
+        return null;
+    }
+
+    private String buildPrompt(Snapshot s, MacroMode heuristicMode) {
+        return "MicroRTS macro choice. Reply with exactly one token: RUSH, BALANCED, or ECON.\n"
+                + "Heuristic=" + heuristicMode
+                + " map=" + s.mapClass
+                + " time=" + s.time
+                + " workers=" + s.ownWorkers.size()
+                + " barracks=" + s.ownBarracks.size()
+                + " army=" + s.ownArmy.size()
+                + " enemyArmy=" + s.enemyArmy.size()
+                + " enemyWorkers=" + s.enemyWorkers.size()
+                + " enemyBarracks=" + s.enemyBarracks.size()
+                + " baseThreat=" + s.isUnderThreat()
+                + ".";
+    }
+
+    private String postOllama(String host, String model, String prompt) throws Exception {
+        String normalizedHost = host.endsWith("/") ? host.substring(0, host.length() - 1) : host;
+        URL url = new URL(normalizedHost + "/api/generate");
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setConnectTimeout(LLM_CONNECT_TIMEOUT_MS);
+        conn.setReadTimeout(LLM_READ_TIMEOUT_MS);
+        conn.setDoOutput(true);
+        conn.setRequestProperty("Content-Type", "application/json");
+
+        String payload = "{\"model\":\"" + jsonEscape(model)
+                + "\",\"prompt\":\"" + jsonEscape(prompt)
+                + "\",\"stream\":false,\"options\":{\"temperature\":0,\"num_predict\":4}}";
+
+        byte[] bytes = payload.getBytes(StandardCharsets.UTF_8);
+        conn.setFixedLengthStreamingMode(bytes.length);
+        try (OutputStream os = conn.getOutputStream()) {
+            os.write(bytes);
+        }
+
+        InputStream stream = conn.getResponseCode() >= 400 ? conn.getErrorStream() : conn.getInputStream();
+        if (stream == null) {
+            return "";
+        }
+        return readLimited(stream, LLM_MAX_RESPONSE_CHARS);
+    }
+
+    private MacroMode parseMacroMode(String text) {
+        if (text == null) {
+            return null;
+        }
+        String upper = text.toUpperCase(Locale.ROOT);
+        int rush = upper.indexOf("RUSH");
+        int balanced = upper.indexOf("BALANCED");
+        int econ = upper.indexOf("ECON");
+        int best = Integer.MAX_VALUE;
+        MacroMode mode = null;
+
+        if (rush >= 0 && rush < best) {
+            best = rush;
+            mode = MacroMode.RUSH;
+        }
+        if (balanced >= 0 && balanced < best) {
+            best = balanced;
+            mode = MacroMode.BALANCED;
+        }
+        if (econ >= 0 && econ < best) {
+            mode = MacroMode.ECON;
+        }
+        return mode;
+    }
+
+    private String readLimited(InputStream stream, int maxChars) throws Exception {
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader br = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+            int ch;
+            while ((ch = br.read()) != -1 && sb.length() < maxChars) {
+                sb.append((char) ch);
+            }
+        }
+        return sb.toString();
+    }
+
+    private String jsonEscape(String value) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            switch (c) {
+                case '\\':
+                    sb.append("\\\\");
+                    break;
+                case '"':
+                    sb.append("\\\"");
+                    break;
+                case '\n':
+                    sb.append("\\n");
+                    break;
+                case '\r':
+                    sb.append("\\r");
+                    break;
+                case '\t':
+                    sb.append("\\t");
+                    break;
+                default:
+                    sb.append(c);
+                    break;
+            }
+        }
+        return sb.toString();
+    }
+
+    private String envOrDefault(String name, String fallback) {
+        String value = System.getenv(name);
+        return value == null || value.trim().isEmpty() ? fallback : value.trim();
+    }
+
+    private boolean canCommand(Unit u, GameState gs) {
+        return u != null && gs.getActionAssignment(u) == null && !actions.containsKey(u);
+    }
+
+    private boolean hasFreeAdjacent(Unit u, GameState gs) {
+        int[][] dirs = {{0, -1}, {1, 0}, {0, 1}, {-1, 0}};
+        for (int[] d : dirs) {
+            int x = u.getX() + d[0];
+            int y = u.getY() + d[1];
+            if (x >= 0 && y >= 0 && x < gs.getPhysicalGameState().getWidth() && y < gs.getPhysicalGameState().getHeight()
+                    && gs.free(x, y)) {
+                return true;
             }
         }
         return false;
     }
 
-    private boolean hasRushPressure(Counts my, Counts opp, boolean enemyNearBase, boolean smallMap, boolean opening) {
-        if (enemyNearBase) {
-            return true;
+    private int findBuildPosition(GameState gs, PhysicalGameState pgs, int desiredX, int desiredY, List<Integer> reservedPositions) {
+        int startX = clamp(desiredX, 0, pgs.getWidth() - 1);
+        int startY = clamp(desiredY, 0, pgs.getHeight() - 1);
+        int maxRadius = Math.max(pgs.getWidth(), pgs.getHeight());
+
+        for (int r = 1; r <= maxRadius; r++) {
+            int bestPos = -1;
+            int bestScore = Integer.MAX_VALUE;
+            for (int x = startX - r; x <= startX + r; x++) {
+                for (int y = startY - r; y <= startY + r; y++) {
+                    if (x < 0 || y < 0 || x >= pgs.getWidth() || y >= pgs.getHeight()) {
+                        continue;
+                    }
+                    if (Math.abs(x - startX) != r && Math.abs(y - startY) != r) {
+                        continue;
+                    }
+                    int pos = x + y * pgs.getWidth();
+                    if (reservedPositions.contains(pos) || !gs.free(x, y)) {
+                        continue;
+                    }
+                    int score = Math.abs(x - desiredX) + Math.abs(y - desiredY);
+                    if (score < bestScore) {
+                        bestScore = score;
+                        bestPos = pos;
+                    }
+                }
+            }
+            if (bestPos >= 0) {
+                return bestPos;
+            }
         }
-        if (opp.barracks.isEmpty()) {
-            return false;
-        }
-        if (!opp.heavy.isEmpty()) {
-            return true;
-        }
-        if (opening && opp.militaryCount() > 0) {
-            return true;
-        }
-        if (smallMap && opp.militaryCount() > my.militaryCount()) {
-            return true;
-        }
-        return opp.militaryCount() > my.militaryCount() + 1;
+        return -1;
     }
 
-    private boolean isOpeningPlanDefensive() {
-        return currentOpeningPlan == OpeningPlan.ANTI_WORKER_RUSH
-                || currentOpeningPlan == OpeningPlan.ANTI_LIGHT_RUSH
-                || currentOpeningPlan == OpeningPlan.ANTI_HEAVY_RUSH;
+    private boolean isMilitary(Unit u) {
+        return u.getType().canAttack && u.getType().canMove && u.getType() != workerType;
     }
 
-    private void updateOpeningTelemetry(int now, Counts my, Counts opp, boolean opening) {
-        if (openingStartWorkerCount < 0) {
-            openingStartWorkerCount = my.workers.size();
-        }
-        if (firstEnemyBarracksSeenTime < 0 && !opp.barracks.isEmpty()) {
-            firstEnemyBarracksSeenTime = now;
-        }
-        if (firstEnemyMilitarySeenTime < 0 && opp.militaryCount() > 0) {
-            firstEnemyMilitarySeenTime = now;
-        }
-        if (firstOwnBarracksSeenTime < 0 && !my.barracks.isEmpty()) {
-            firstOwnBarracksSeenTime = now;
-        }
-        if (firstDefenderSeenTime < 0 && my.militaryCount() > 0) {
-            firstDefenderSeenTime = now;
-        }
-        if (opening) {
-            openingWorkerLosses = Math.max(openingWorkerLosses, Math.max(0, openingStartWorkerCount - my.workers.size()));
-        }
+    private boolean hasArmyAdvantage(Snapshot s) {
+        return s.ownArmy.size() >= 2 && s.ownArmy.size() >= s.enemyArmy.size() + 2;
     }
 
-    private boolean isOpeningPhase(GameState gs, boolean smallMap) {
-        return gs.getTime() < (smallMap ? SMALL_MAP_OPENING_TICKS : LARGE_MAP_OPENING_TICKS);
-    }
-
-    private int[] chooseBarracksSite(PhysicalGameState pgs, Unit anchor, int enemy) {
-        if (anchor == null) {
-            return null;
-        }
-
-        int[][] ring = {
-                {1, 0}, {-1, 0}, {0, 1}, {0, -1},
-                {2, 0}, {-2, 0}, {0, 2}, {0, -2},
-                {1, 1}, {-1, 1}, {1, -1}, {-1, -1}
-        };
-
-        int bestScore = Integer.MIN_VALUE;
-        int[] best = null;
-
-        for (int[] d : ring) {
-            int x = anchor.getX() + d[0];
-            int y = anchor.getY() + d[1];
-            if (x < 0 || y < 0 || x >= pgs.getWidth() || y >= pgs.getHeight()) {
+    private Unit closestIdleWorkerTo(Unit anchor, List<Unit> workers, GameState gs, boolean preferEmptyHands) {
+        Unit best = null;
+        int bestScore = Integer.MAX_VALUE;
+        for (Unit worker : workers) {
+            if (!canCommand(worker, gs)) {
                 continue;
             }
-            if (pgs.getTerrain(x, y) != PhysicalGameState.TERRAIN_NONE) {
-                continue;
-            }
-            if (pgs.getUnitAt(x, y) != null) {
-                continue;
-            }
-
-            int baseDist = Math.abs(anchor.getX() - x) + Math.abs(anchor.getY() - y);
-            int enemyDist = nearestEnemyDistanceFromCell(pgs, x, y, enemy);
-            int score = enemyDist * 2 - baseDist;
-
-            if (score > bestScore) {
+            int carryPenalty = preferEmptyHands && worker.getResources() > 0 ? 1000 : 0;
+            int score = distance(worker, anchor) + carryPenalty;
+            if (score < bestScore) {
                 bestScore = score;
-                best = new int[] {x, y};
+                best = worker;
             }
         }
         return best;
     }
 
-    private Unit selectBuilder(List<Unit> workers, Unit base) {
-        if (workers.isEmpty()) {
+    private Unit closestIdleWorkerToAny(List<Unit> workers, List<Unit> anchors, GameState gs, boolean preferEmptyHands) {
+        Unit best = null;
+        int bestScore = Integer.MAX_VALUE;
+        for (Unit worker : workers) {
+            if (!canCommand(worker, gs)) {
+                continue;
+            }
+            int carryPenalty = preferEmptyHands && worker.getResources() > 0 ? 1000 : 0;
+            int score = distanceToClosest(worker, anchors) + carryPenalty;
+            if (score < bestScore) {
+                bestScore = score;
+                best = worker;
+            }
+        }
+        return best;
+    }
+
+    private Unit closestUnit(Unit from, List<Unit> units) {
+        if (from == null || units == null || units.isEmpty()) {
             return null;
         }
-        if (base == null) {
-            return workers.get(0);
-        }
-
         Unit best = null;
-        int bestD = Integer.MAX_VALUE;
-        for (Unit w : workers) {
-            int d = manhattan(w, base);
-            if (d < bestD) {
-                bestD = d;
-                best = w;
-            }
-        }
-        return best;
-    }
-
-    private Unit nearestEnemy(PhysicalGameState pgs, Unit from, int enemy) {
-        Unit best = null;
-        int bestD = Integer.MAX_VALUE;
-        for (Unit u : pgs.getUnits()) {
-            if (u.getPlayer() != enemy) {
-                continue;
-            }
-            int d = manhattan(from, u);
-            if (d < bestD) {
-                bestD = d;
+        int bestDist = Integer.MAX_VALUE;
+        for (Unit u : units) {
+            int d = distance(from, u);
+            if (d < bestDist) {
+                bestDist = d;
                 best = u;
             }
         }
         return best;
     }
 
-    private Unit nearestEnemyWithin(PhysicalGameState pgs, Unit from, int enemy, int maxDistance) {
+    private Unit closestUnit(int x, int y, List<Unit> units) {
+        if (units == null || units.isEmpty()) {
+            return null;
+        }
         Unit best = null;
-        int bestD = Integer.MAX_VALUE;
-        for (Unit u : pgs.getUnits()) {
-            if (u.getPlayer() != enemy) {
-                continue;
-            }
-            int d = manhattan(from, u);
-            if (d <= maxDistance && d < bestD) {
-                bestD = d;
+        int bestDist = Integer.MAX_VALUE;
+        for (Unit u : units) {
+            int d = distance(x, y, u.getX(), u.getY());
+            if (d < bestDist) {
+                bestDist = d;
                 best = u;
             }
         }
         return best;
     }
 
-    private int nearestEnemyDistanceFromCell(PhysicalGameState pgs, int x, int y, int enemy) {
-        int best = Integer.MAX_VALUE;
-        for (Unit u : pgs.getUnits()) {
-            if (u.getPlayer() != enemy) {
-                continue;
-            }
-            int d = Math.abs(u.getX() - x) + Math.abs(u.getY() - y);
-            if (d < best) {
-                best = d;
-            }
-        }
-        return best;
+    private Unit closestWithin(int x, int y, List<Unit> units, int maxDistance) {
+        Unit best = closestUnit(x, y, units);
+        return best != null && distance(x, y, best.getX(), best.getY()) <= maxDistance ? best : null;
     }
 
-    private Unit nearestResource(PhysicalGameState pgs, Unit from, List<Unit> resources) {
+    private Unit closestToCenter(List<Unit> units, int width, int height) {
+        if (units == null || units.isEmpty()) {
+            return null;
+        }
+        int cx = width / 2;
+        int cy = height / 2;
         Unit best = null;
-        int bestD = Integer.MAX_VALUE;
-        for (Unit r : resources) {
-            int d = manhattan(from, r);
-            if (d < bestD) {
-                bestD = d;
-                best = r;
+        int bestDist = Integer.MAX_VALUE;
+        for (Unit u : units) {
+            int d = distance(u.getX(), u.getY(), cx, cy);
+            if (d < bestDist) {
+                bestDist = d;
+                best = u;
             }
         }
         return best;
     }
 
-    private List<Unit> listResources(PhysicalGameState pgs) {
-        List<Unit> out = new ArrayList<>();
-        for (Unit u : pgs.getUnits()) {
-            if (u.getType().isResource) {
-                out.add(u);
+    private int[] armyCenter(Snapshot s) {
+        if (s.ownArmy.isEmpty()) {
+            Unit anchor = s.mainBase != null ? s.mainBase : closestToCenter(s.ownWorkers, s.width, s.height);
+            if (anchor != null) {
+                return new int[] {anchor.getX(), anchor.getY()};
             }
+            return new int[] {s.width / 2, s.height / 2};
         }
-        return out;
-    }
-
-    private int manhattan(Unit a, Unit b) {
-        return Math.abs(a.getX() - b.getX()) + Math.abs(a.getY() - b.getY());
-    }
-
-    private Counts countUnits(PhysicalGameState pgs, int player) {
-        Counts c = new Counts();
-        for (Unit u : pgs.getUnits()) {
-            if (u.getPlayer() != player) {
-                continue;
-            }
-            if (u.getType() == workerType) {
-                c.workers.add(u);
-            } else if (u.getType() == baseType) {
-                c.bases.add(u);
-            } else if (u.getType() == barracksType) {
-                c.barracks.add(u);
-            } else if (u.getType() == lightType) {
-                c.light.add(u);
-            } else if (u.getType() == rangedType) {
-                c.ranged.add(u);
-            } else if (u.getType() == heavyType) {
-                c.heavy.add(u);
-            }
+        int x = 0;
+        int y = 0;
+        for (Unit u : s.ownArmy) {
+            x += u.getX();
+            y += u.getY();
         }
-        return c;
+        return new int[] {x / s.ownArmy.size(), y / s.ownArmy.size()};
     }
 
-    private float clamp01(float value) {
-        if (value < 0.0f) {
-            return 0.0f;
+    private int distanceToClosest(Unit from, List<Unit> units) {
+        if (from == null || units == null || units.isEmpty()) {
+            return Integer.MAX_VALUE / 4;
         }
-        if (value > 1.0f) {
-            return 1.0f;
+        int best = Integer.MAX_VALUE / 4;
+        for (Unit u : units) {
+            best = Math.min(best, distance(from, u));
         }
-        return value;
+        return best;
     }
 
-    private float normalizeSigned(int value, float normalizer) {
-        return Math.max(-1.0f, Math.min(1.0f, value / normalizer));
+    private int distance(Unit a, Unit b) {
+        if (a == null || b == null) {
+            return Integer.MAX_VALUE / 4;
+        }
+        return distance(a.getX(), a.getY(), b.getX(), b.getY());
     }
 
-    private int clampInt(int value, int min, int max) {
+    private int distance(int x1, int y1, int x2, int y2) {
+        return Math.abs(x1 - x2) + Math.abs(y1 - y2);
+    }
+
+    private int clamp(int value, int min, int max) {
         return Math.max(min, Math.min(max, value));
     }
 
-    private int strategyCooldown(int now) {
-        if (lastStrategyChangeTime < 0) {
-            return POLICY_LOCK_TICKS;
+    private void debugLog(Snapshot s, MacroMode heuristicMode, MacroMode llmMode, MacroMode finalMode, int targetWorkers, int desiredBarracks) {
+        if (!DEBUG || s.time - lastDebugTime < 80) {
+            return;
         }
-        return now - lastStrategyChangeTime;
-    }
-
-    private static final class Counts {
-        final List<Unit> workers = new ArrayList<>();
-        final List<Unit> bases = new ArrayList<>();
-        final List<Unit> barracks = new ArrayList<>();
-        final List<Unit> light = new ArrayList<>();
-        final List<Unit> ranged = new ArrayList<>();
-        final List<Unit> heavy = new ArrayList<>();
-
-        int militaryCount() {
-            return light.size() + ranged.size() + heavy.size();
-        }
-
-        int combatWithWorkers() {
-            return militaryCount() + Math.min(2, workers.size());
-        }
-
-        List<Unit> mobileUnits() {
-            List<Unit> units = new ArrayList<>(workers.size() + light.size() + ranged.size() + heavy.size());
-            units.addAll(workers);
-            units.addAll(light);
-            units.addAll(ranged);
-            units.addAll(heavy);
-            return units;
-        }
-    }
-
-    private static final class PolicyOutput {
-        final MacroAction action;
-        final float confidence;
-        final float margin;
-
-        PolicyOutput(MacroAction action, float confidence, float margin) {
-            this.action = action;
-            this.confidence = confidence;
-            this.margin = margin;
-        }
+        lastDebugTime = s.time;
+        System.out.println("[XieBot] t=" + s.time
+                + " heuristic=" + heuristicMode
+                + " llm=" + (llmMode == null ? "none" : llmMode)
+                + " final=" + finalMode
+                + " threat=" + s.isUnderThreat()
+                + " workers=" + s.ownWorkers.size() + "/" + targetWorkers
+                + " barracks=" + s.ownBarracks.size() + "/" + desiredBarracks
+                + " army=" + s.ownArmy.size()
+                + " enemyArmy=" + s.enemyArmy.size()
+                + " llmFailures=" + llmFailures);
     }
 
     @Override
     public List<ParameterSpecification> getParameters() {
         return new ArrayList<>();
+    }
+
+    private static final class Snapshot {
+        int player;
+        int enemy;
+        int time;
+        int width;
+        int height;
+        int area;
+        MapClass mapClass = MapClass.MEDIUM;
+        Unit mainBase;
+        Unit enemyBase;
+        int pendingWorkers;
+        int pendingBases;
+        int pendingBarracks;
+        int pendingLights;
+        int pendingRanged;
+        int ownLights;
+        int ownRanged;
+        int ownHeavy;
+        final List<Unit> ownBases = new ArrayList<>();
+        final List<Unit> ownBarracks = new ArrayList<>();
+        final List<Unit> ownWorkers = new ArrayList<>();
+        final List<Unit> ownArmy = new ArrayList<>();
+        final List<Unit> enemyBases = new ArrayList<>();
+        final List<Unit> enemyBarracks = new ArrayList<>();
+        final List<Unit> enemyWorkers = new ArrayList<>();
+        final List<Unit> enemyArmy = new ArrayList<>();
+        final List<Unit> enemyUnits = new ArrayList<>();
+        final List<Unit> resources = new ArrayList<>();
+        List<Unit> enemyThreats = new ArrayList<>();
+
+        int totalWorkers() {
+            return ownWorkers.size() + pendingWorkers;
+        }
+
+        int totalBases() {
+            return ownBases.size() + pendingBases;
+        }
+
+        int totalBarracks() {
+            return ownBarracks.size() + pendingBarracks;
+        }
+
+        boolean isUnderThreat() {
+            return !enemyThreats.isEmpty();
+        }
     }
 }
