@@ -3,7 +3,7 @@
   "display_name": "xiebot",
   "agent_class": "XieBot",
   "agent_file": "XieBot.java",
-  "model_provider": "none",
-  "model_name": "none",
-  "description": "Hierarchical scripted bot with an embedded PPO-style macro-policy scaffold and selective NaiveMCTS tactics. No runtime network calls."
+  "model_provider": "ollama",
+  "model_name": "OLLAMA_MODEL env var, default llama3.1:8b",
+  "description": "Deterministic MicroRTS rush bot with bounded Ollama macro advice. The script controls economy, barracks timing, Light production, defense, and attacks; Ollama only occasionally selects RUSH, BALANCED, or ECON and is safely ignored on timeout or invalid output."
 }
