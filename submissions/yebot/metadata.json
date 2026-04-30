@@ -1,0 +1,9 @@
+{
+  "team_name": "yebot",
+  "display_name": "yebot",
+  "agent_class": "yebot",
+  "agent_file": "yebot.java",
+  "model_provider": "ollama",
+  "model_name": "qwen3:8b",
+  "description": "Macro-LLM + Hard-coded Micro"
+}

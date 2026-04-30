@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Map Editor - MicroRTS LLM Competition</title>
+    <link rel="stylesheet" href="style.css">
+    <style>
+        .editor-layout { display: flex; gap: 1.5rem; flex-wrap: wrap; margin-top: 1rem; }
+        .editor-left { flex: 1; min-width: 320px; }
+        .editor-right { flex: 0 0 auto; }
+
+        /* Toolbar */
+        .map-toolbar { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
+        .map-toolbar label { color: var(--text-secondary); font-size: 0.85rem; }
+        .map-toolbar select, .map-toolbar input[type="number"] {
+            padding: 0.35rem 0.5rem; background: var(--bg-secondary); border: 1px solid var(--border);
+            border-radius: 6px; color: var(--text-primary); font-size: 0.85rem; outline: none; }
+        .map-toolbar input[type="number"] { width: 60px; }
+        .map-toolbar select:focus, .map-toolbar input[type="number"]:focus { border-color: var(--accent); }
+
+        /* Brush palette */
+        .palette { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 1rem; }
+        .palette-btn {
+            width: 44px; height: 44px; border: 2px solid var(--border); border-radius: 6px;
+            cursor: pointer; display: flex; align-items: center; justify-content: center;
+            font-size: 0.65rem; font-weight: 600; color: #fff; transition: border-color 0.15s, transform 0.1s;
+            flex-direction: column; gap: 1px; position: relative; }
+        .palette-btn:hover { border-color: var(--text-secondary); transform: scale(1.05); }
+        .palette-btn.active { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(88,166,255,0.3); }
+        .palette-btn .plabel { font-size: 0.55rem; line-height: 1; }
+
+        /* Canvas */
+        .map-canvas-wrap {
+            border: 2px solid var(--border); border-radius: 6px; display: inline-block;
+            background: var(--bg-secondary); cursor: crosshair; }
+        .map-canvas-wrap canvas { display: block; }
+
+        /* Info panel */
+        .info-panel { background: var(--bg-secondary); border: 1px solid var(--border);
+            border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
+        .info-panel h3 { font-size: 0.95rem; margin-bottom: 0.5rem; }
+        .info-panel p, .info-panel li { color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 0.25rem; }
+        .info-panel ul { padding-left: 1.25rem; margin-bottom: 0.5rem; }
+
+        /* Map metadata */
+        .meta-form { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem; }
+        .meta-form label { color: var(--text-secondary); font-size: 0.85rem; }
+        .meta-form input, .meta-form textarea {
+            padding: 0.4rem 0.65rem; background: var(--bg-secondary); border: 1px solid var(--border);
+            border-radius: 6px; color: var(--text-primary); font-size: 0.85rem; outline: none; font-family: inherit; }
+        .meta-form input:focus, .meta-form textarea:focus { border-color: var(--accent); }
+        .meta-form textarea { min-height: 60px; resize: vertical; }
+
+        /* Buttons */
+        .btn { padding: 0.45rem 1rem; border-radius: 6px; font-size: 0.85rem; font-weight: 600;
+            cursor: pointer; border: 1px solid var(--border); transition: background 0.15s; }
+        .btn-primary { background: var(--accent); color: #000; border-color: var(--accent); }
+        .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+        .btn-secondary { background: var(--bg-tertiary); color: var(--text-primary); }
+        .btn-secondary:hover { background: var(--border); }
+        .btn-group { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+
+        /* XML output */
+        .xml-output { background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 6px;
+            padding: 1rem; font-family: monospace; font-size: 0.8rem; color: var(--text-primary);
+            white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow-y: auto;
+            margin-bottom: 1rem; display: none; }
+        .xml-output.visible { display: block; }
+
+        /* Submission steps */
+        .steps { counter-reset: step; margin-bottom: 1rem; }
+        .steps li { counter-increment: step; color: var(--text-secondary); font-size: 0.85rem;
+            margin-bottom: 0.5rem; padding-left: 0.25rem; }
+        .steps li::marker { content: counter(step) ". "; color: var(--accent); font-weight: 600; }
+
+        /* Gallery */
+        .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 1rem; margin-top: 1rem; }
+        .gallery-card { background: var(--bg-secondary); border: 1px solid var(--border);
+            border-radius: 6px; padding: 0.75rem; cursor: pointer; transition: border-color 0.15s; }
+        .gallery-card:hover { border-color: var(--accent); }
+        .gallery-card canvas { width: 100%; aspect-ratio: 1; display: block; border-radius: 4px;
+            margin-bottom: 0.5rem; background: #1a1a2e; }
+        .gallery-card .card-name { font-size: 0.85rem; font-weight: 500; }
+        .gallery-card .card-size { font-size: 0.75rem; color: var(--text-muted); }
+
+        /* Tabs */
+        .map-tabs { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; }
+        .map-tab { padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer;
+            background: transparent; border: 1px solid var(--border); color: var(--text-secondary);
+            font-size: 0.9rem; transition: background 0.15s, color 0.15s; }
+        .map-tab:hover { color: var(--text-primary); background: var(--bg-tertiary); }
+        .map-tab.active { color: var(--text-primary); background: var(--bg-tertiary);
+            font-weight: 500; border-color: var(--accent); }
+        .map-tab-content { display: none; }
+        .map-tab-content.active { display: block; }
+
+        /* Player resource inputs */
+        .player-res { display: flex; gap: 1rem; align-items: center; margin-bottom: 0.75rem; }
+        .player-res label { font-size: 0.85rem; min-width: 120px; }
+        .player-res .p0-label { color: #0C7BDC; }
+        .player-res .p1-label { color: #BF3682; }
+
+        /* Erase mode indicator */
+        .erase-hint { color: var(--text-muted); font-size: 0.75rem; margin-bottom: 0.5rem; }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="header-content">
+            <h1>MicroRTS LLM Competition</h1>
+            <p class="subtitle">IEEE WCCI 2026 &mdash; Map Editor &amp; Submission</p>
+            <nav>
+                <a href="index.html">Leaderboard</a>
+                <a href="submit.html">Submit Agent</a>
+                <a href="rules.html">Rules</a>
+                <a href="match.html">Run Match</a>
+                <a href="maps.html" class="tab active">Maps</a>
+            </nav>
+        </div>
+    </header>
+
+    <div class="page-content" style="max-width:1100px;">
+        <h1>Map Editor &amp; Gallery</h1>
+
+        <div class="map-tabs">
+            <button class="map-tab active" data-tab="editor">Map Editor</button>
+            <button class="map-tab" data-tab="gallery">Existing Maps</button>
+            <button class="map-tab" data-tab="howto">How to Submit</button>
+        </div>
+
+        <!-- Editor Tab -->
+        <div id="tab-editor" class="map-tab-content active">
+            <div class="map-toolbar">
+                <label>Width</label>
+                <input type="number" id="map-width" value="8" min="4" max="64" step="1">
+                <label>Height</label>
+                <input type="number" id="map-height" value="8" min="4" max="64" step="1">
+                <button class="btn btn-secondary" id="btn-resize">Resize</button>
+                <button class="btn btn-secondary" id="btn-clear">Clear Map</button>
+                <button class="btn btn-secondary" id="btn-mirror-h">Mirror &harr;</button>
+                <button class="btn btn-secondary" id="btn-mirror-d">Mirror &#x2922;</button>
+            </div>
+
+            <div class="player-res">
+                <label><span class="p0-label">Player 0</span> starting resources</label>
+                <input type="number" id="p0-res" value="5" min="0" max="100" style="width:60px;padding:0.3rem 0.5rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-size:0.85rem;">
+                <label><span class="p1-label">Player 1</span> starting resources</label>
+                <input type="number" id="p1-res" value="5" min="0" max="100" style="width:60px;padding:0.3rem 0.5rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-size:0.85rem;">
+            </div>
+
+            <p class="erase-hint">Right-click to erase. Click and drag to paint.</p>
+
+            <div class="palette" id="palette"></div>
+
+            <div class="editor-layout">
+                <div class="editor-left">
+                    <div class="map-canvas-wrap">
+                        <canvas id="map-canvas" width="400" height="400"></canvas>
+                    </div>
+                </div>
+                <div class="editor-right">
+                    <div class="info-panel">
+                        <h3>Unit Reference</h3>
+                        <ul>
+                            <li><strong>Resource</strong> &mdash; HP:1, provides resources for harvesting</li>
+                            <li><strong>Base</strong> &mdash; HP:10, trains Workers (cost 1)</li>
+                            <li><strong>Barracks</strong> &mdash; HP:4, trains Light/Heavy/Ranged</li>
+                            <li><strong>Worker</strong> &mdash; HP:1, harvests, builds, fights</li>
+                            <li><strong>Light</strong> &mdash; HP:4, fast melee attacker</li>
+                            <li><strong>Heavy</strong> &mdash; HP:4, slow, high damage</li>
+                            <li><strong>Ranged</strong> &mdash; HP:1, attacks at range 3</li>
+                        </ul>
+                        <h3>Tips</h3>
+                        <ul>
+                            <li>Symmetry makes for fair maps</li>
+                            <li>Use <strong>Mirror</strong> buttons for quick symmetric layouts</li>
+                            <li>Each player should have at least 1 Base and access to Resources</li>
+                            <li>Walls create chokepoints and tactical depth</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <div class="btn-group" style="margin-top:1rem;">
+                <button class="btn btn-primary" id="btn-export">Export XML</button>
+                <button class="btn btn-secondary" id="btn-copy">Copy to Clipboard</button>
+                <button class="btn btn-secondary" id="btn-download">Download .xml</button>
+                <button class="btn btn-secondary" id="btn-import">Import XML</button>
+                <input type="file" id="file-import" accept=".xml" style="display:none;">
+            </div>
+
+            <div class="xml-output" id="xml-output"></div>
+
+            <div class="meta-form" id="meta-form" style="display:none;">
+                <h3 style="margin-bottom:0.5rem;">Map Submission Details</h3>
+                <label>Map Name</label>
+                <input type="text" id="map-name" placeholder="e.g. ChokePoint8x8">
+                <label>Author</label>
+                <input type="text" id="map-author" placeholder="Your name or GitHub username">
+                <label>Description (optional)</label>
+                <textarea id="map-desc" placeholder="Describe your map design..."></textarea>
+                <div class="btn-group" style="margin-top:0.5rem;">
+                    <button class="btn btn-primary" id="btn-submit-pr">Open GitHub PR</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Gallery Tab -->
+        <div id="tab-gallery" class="map-tab-content">
+            <p class="section-desc">Browse existing maps in the repository. Click a map to load it in the editor.</p>
+            <div class="gallery" id="gallery"></div>
+        </div>
+
+        <!-- How to Submit Tab -->
+        <div id="tab-howto" class="map-tab-content">
+            <h2>How to Submit a Map</h2>
+            <p style="color:var(--text-secondary);margin-bottom:1rem;">
+                There are two ways to contribute map designs to the MicroRTS competition:
+            </p>
+
+            <h3>Option 1: Use the Editor (Recommended)</h3>
+            <ol class="steps">
+                <li>Switch to the <strong>Map Editor</strong> tab and design your map</li>
+                <li>Click <strong>Export XML</strong> to generate the map file</li>
+                <li>Click <strong>Download .xml</strong> to save the file</li>
+                <li>Fork the <a href="https://github.com/drchangliu/MicroRTS/" style="color:var(--accent);">MicroRTS repository</a></li>
+                <li>Add your map file to <code>maps/&lt;WxH&gt;/YourMapName.xml</code></li>
+                <li>Open a Pull Request with a description of your map design</li>
+            </ol>
+
+            <h3>Option 2: Write XML Manually</h3>
+            <p style="color:var(--text-secondary);margin-bottom:0.5rem;">
+                Map files are XML with this structure:
+            </p>
+            <pre style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:6px;padding:1rem;overflow-x:auto;margin-bottom:1rem;"><code style="color:var(--text-primary);font-size:0.8rem;">&lt;rts.PhysicalGameState width="8" height="8"&gt;
+  &lt;terrain&gt;0000000000000000000000000000000000000000000000000000000000000000&lt;/terrain&gt;
+  &lt;players&gt;
+    &lt;rts.Player ID="0" resources="5"&gt;&lt;/rts.Player&gt;
+    &lt;rts.Player ID="1" resources="5"&gt;&lt;/rts.Player&gt;
+  &lt;/players&gt;
+  &lt;units&gt;
+    &lt;rts.units.Unit type="Resource" ID="0" player="-1" x="0" y="0" resources="20" hitpoints="1"&gt;&lt;/rts.units.Unit&gt;
+    &lt;rts.units.Unit type="Base" ID="1" player="0" x="2" y="1" resources="0" hitpoints="10"&gt;&lt;/rts.units.Unit&gt;
+    &lt;rts.units.Unit type="Worker" ID="2" player="0" x="1" y="1" resources="0" hitpoints="1"&gt;&lt;/rts.units.Unit&gt;
+  &lt;/units&gt;
+&lt;/rts.PhysicalGameState&gt;</code></pre>
+
+            <h3>Terrain Values</h3>
+            <ul style="color:var(--text-secondary);font-size:0.85rem;">
+                <li><code>0</code> = open ground</li>
+                <li><code>1</code> = wall (impassable)</li>
+            </ul>
+
+            <h3>Map Design Guidelines</h3>
+            <ul style="color:var(--text-secondary);font-size:0.85rem;">
+                <li>Maps should be <strong>symmetric</strong> for fair play (rotational or mirror symmetry)</li>
+                <li>Common sizes: 8x8, 12x12, 16x16, 24x24, 32x32</li>
+                <li>Each player needs at least one Base and access to Resource nodes</li>
+                <li>Resource nodes are neutral (player="-1") with resources="20" typically</li>
+                <li>Consider chokepoints, open areas, and resource placement for strategic variety</li>
+                <li>The competition uses <code>maps/8x8/basesWorkers8x8.xml</code> by default</li>
+            </ul>
+        </div>
+    </div>
+
+    <footer>
+        <div class="footer-content">
+            <p><a href="https://github.com/drchangliu/MicroRTS/">MicroRTS</a> &mdash; <a href="https://github.com/drchangliu/MicroRTS/blob/master/COMPETITION.md">IEEE WCCI 2026 LLM Game AI Competition</a></p>
+        </div>
+    </footer>
+
+    <script>
+    (function() {
+        // --- Constants ---
+        var COLORS = {
+            ground: '#1a1a2e',
+            wall: '#4a4a5a',
+            grid: '#2a2a3e',
+            resource: '#C2DFAE',
+            p0: '#0C7BDC',
+            p1: '#BF3682',
+            neutral: '#888'
+        };
+
+        var UNIT_HP = { Resource: 1, Base: 10, Barracks: 4, Worker: 1, Light: 4, Heavy: 4, Ranged: 1 };
+        var UNIT_RES = { Resource: 20, Base: 0, Barracks: 0, Worker: 0, Light: 0, Heavy: 0, Ranged: 0 };
+
+        var BRUSHES = [
+            { id: 'ground', label: 'Ground', color: COLORS.ground, type: 'terrain', value: 0 },
+            { id: 'wall', label: 'Wall', color: COLORS.wall, type: 'terrain', value: 1 },
+            { id: 'resource', label: 'Resource', color: COLORS.resource, type: 'unit', unitType: 'Resource', player: -1 },
+            { id: 'base0', label: 'Base P0', color: COLORS.p0, type: 'unit', unitType: 'Base', player: 0 },
+            { id: 'base1', label: 'Base P1', color: COLORS.p1, type: 'unit', unitType: 'Base', player: 1 },
+            { id: 'barracks0', label: 'Brks P0', color: COLORS.p0, type: 'unit', unitType: 'Barracks', player: 0, accent: true },
+            { id: 'barracks1', label: 'Brks P1', color: COLORS.p1, type: 'unit', unitType: 'Barracks', player: 1, accent: true },
+            { id: 'worker0', label: 'Wkr P0', color: COLORS.p0, type: 'unit', unitType: 'Worker', player: 0 },
+            { id: 'worker1', label: 'Wkr P1', color: COLORS.p1, type: 'unit', unitType: 'Worker', player: 1 },
+            { id: 'light0', label: 'Light P0', color: '#D55E00', type: 'unit', unitType: 'Light', player: 0 },
+            { id: 'light1', label: 'Light P1', color: '#D55E00', type: 'unit', unitType: 'Light', player: 1 },
+            { id: 'heavy0', label: 'Heavy P0', color: '#F0E442', type: 'unit', unitType: 'Heavy', player: 0 },
+            { id: 'heavy1', label: 'Heavy P1', color: '#F0E442', type: 'unit', unitType: 'Heavy', player: 1 },
+            { id: 'ranged0', label: 'Rng P0', color: '#0072B2', type: 'unit', unitType: 'Ranged', player: 0 },
+            { id: 'ranged1', label: 'Rng P1', color: '#0072B2', type: 'unit', unitType: 'Ranged', player: 1 }
+        ];
+
+        // Known maps for the gallery
+        var KNOWN_MAPS = [
+            { name: 'basesWorkers8x8', path: 'maps/8x8/basesWorkers8x8.xml', w: 8, h: 8 },
+            { name: 'basesWorkersBarracks8x8', path: 'maps/8x8/basesWorkersBarracks8x8.xml', w: 8, h: 8 },
+            { name: 'FourBasesWorkers8x8', path: 'maps/8x8/FourBasesWorkers8x8.xml', w: 8, h: 8 },
+            { name: 'basesWorkers8x8Obstacle', path: 'maps/8x8/basesWorkers8x8Obstacle.xml', w: 8, h: 8 },
+            { name: 'melee8x8Mixed6', path: 'maps/8x8/melee8x8Mixed6.xml', w: 8, h: 8 },
+            { name: 'TwoBasesWorkers8x8', path: 'maps/8x8/TwoBasesWorkers8x8.xml', w: 8, h: 8 },
+            { name: 'ThreeBasesWorkers8x8', path: 'maps/8x8/ThreeBasesWorkers8x8.xml', w: 8, h: 8 },
+            { name: 'basesWorkers12x12', path: 'maps/12x12/basesWorkers12x12.xml', w: 12, h: 12 },
+            { name: 'basesWorkers16x16', path: 'maps/16x16/basesWorkers16x16.xml', w: 16, h: 16 },
+            { name: 'basesWorkers16x16A', path: 'maps/16x16/basesWorkers16x16A.xml', w: 16, h: 16 },
+            { name: 'basesWorkers24x24', path: 'maps/24x24/basesWorkers24x24.xml', w: 24, h: 24 },
+            { name: 'basesWorkers32x32', path: 'maps/32x32/basesWorkers32x32.xml', w: 32, h: 32 }
+        ];
+
+        // --- State ---
+        var mapW = 8, mapH = 8;
+        var terrain = []; // mapW*mapH, 0=ground, 1=wall
+        var units = [];   // [{type, player, x, y, resources, hitpoints}]
+        var activeBrush = BRUSHES[0];
+        var painting = false;
+        var erasing = false;
+
+        // --- DOM ---
+        var canvas = document.getElementById('map-canvas');
+        var ctx = canvas.getContext('2d');
+        var paletteEl = document.getElementById('palette');
+        var xmlOutput = document.getElementById('xml-output');
+        var widthInput = document.getElementById('map-width');
+        var heightInput = document.getElementById('map-height');
+
+        // --- Tab switching ---
+        var tabBtns = document.querySelectorAll('.map-tab');
+        for (var i = 0; i < tabBtns.length; i++) {
+            tabBtns[i].addEventListener('click', (function(btn) {
+                return function() {
+                    for (var j = 0; j < tabBtns.length; j++) tabBtns[j].classList.remove('active');
+                    btn.classList.add('active');
+                    var tabs = document.querySelectorAll('.map-tab-content');
+                    for (var j = 0; j < tabs.length; j++) tabs[j].classList.remove('active');
+                    document.getElementById('tab-' + btn.getAttribute('data-tab')).classList.add('active');
+                    if (btn.getAttribute('data-tab') === 'gallery') buildGallery();
+                };
+            })(tabBtns[i]));
+        }
+
+        // --- Build palette ---
+        function buildPalette() {
+            paletteEl.innerHTML = '';
+            for (var i = 0; i < BRUSHES.length; i++) {
+                var b = BRUSHES[i];
+                var btn = document.createElement('button');
+                btn.className = 'palette-btn' + (b === activeBrush ? ' active' : '');
+                btn.title = b.label;
+                btn.setAttribute('data-idx', i);
+                var swatch = b.color;
+                if (b.accent) swatch = 'repeating-linear-gradient(45deg,' + b.color + ',' + b.color + ' 3px,transparent 3px,transparent 6px)';
+                if (b.id === 'ground') swatch = COLORS.ground;
+                btn.style.background = swatch;
+                // Label
+                var lbl = document.createElement('span');
+                lbl.className = 'plabel';
+                lbl.textContent = b.label;
+                if (b.color === '#F0E442' || b.color === COLORS.resource) lbl.style.color = '#000';
+                btn.appendChild(lbl);
+                btn.addEventListener('click', (function(idx) {
+                    return function() {
+                        activeBrush = BRUSHES[idx];
+                        var btns = paletteEl.querySelectorAll('.palette-btn');
+                        for (var j = 0; j < btns.length; j++) btns[j].classList.remove('active');
+                        this.classList.add('active');
+                    };
+                })(i));
+                paletteEl.appendChild(btn);
+            }
+        }
+
+        // --- Map init ---
+        function initMap(w, h) {
+            mapW = w; mapH = h;
+            terrain = [];
+            for (var i = 0; i < w * h; i++) terrain.push(0);
+            units = [];
+            widthInput.value = w;
+            heightInput.value = h;
+            resizeCanvas();
+            draw();
+        }
+
+        function resizeCanvas() {
+            var maxPx = 500;
+            var cellSize = Math.floor(maxPx / Math.max(mapW, mapH));
+            cellSize = Math.max(cellSize, 12);
+            cellSize = Math.min(cellSize, 60);
+            canvas.width = mapW * cellSize;
+            canvas.height = mapH * cellSize;
+        }
+
+        function cellSize() {
+            return canvas.width / mapW;
+        }
+
+        // --- Drawing ---
+        function draw() {
+            var cs = cellSize();
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Terrain
+            for (var y = 0; y < mapH; y++) {
+                for (var x = 0; x < mapW; x++) {
+                    var t = terrain[y * mapW + x];
+                    ctx.fillStyle = t === 1 ? COLORS.wall : COLORS.ground;
+                    ctx.fillRect(x * cs, y * cs, cs, cs);
+                }
+            }
+
+            // Grid
+            ctx.strokeStyle = COLORS.grid;
+            ctx.lineWidth = 0.5;
+            for (var x = 0; x <= mapW; x++) {
+                ctx.beginPath(); ctx.moveTo(x * cs, 0); ctx.lineTo(x * cs, mapH * cs); ctx.stroke();
+            }
+            for (var y = 0; y <= mapH; y++) {
+                ctx.beginPath(); ctx.moveTo(0, y * cs); ctx.lineTo(mapW * cs, y * cs); ctx.stroke();
+            }
+
+            // Units
+            for (var i = 0; i < units.length; i++) {
+                var u = units[i];
+                drawUnit(u, cs);
+            }
+        }
+
+        function drawUnit(u, cs) {
+            var ux = u.x * cs, uy = u.y * cs;
+            var pad = cs * 0.1;
+            var sz = cs - pad * 2;
+            var color = u.player === 0 ? COLORS.p0 : u.player === 1 ? COLORS.p1 : COLORS.neutral;
+
+            if (u.type === 'Resource') {
+                // Diamond
+                ctx.fillStyle = COLORS.resource;
+                var cx = ux + cs / 2, cy = uy + cs / 2, r = sz / 2;
+                ctx.beginPath();
+                ctx.moveTo(cx, cy - r); ctx.lineTo(cx + r, cy);
+                ctx.lineTo(cx, cy + r); ctx.lineTo(cx - r, cy);
+                ctx.closePath(); ctx.fill();
+                if (cs >= 20) {
+                    ctx.fillStyle = '#000'; ctx.font = Math.max(8, cs * 0.3) + 'px sans-serif';
+                    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                    ctx.fillText(u.resources || 20, cx, cy);
+                }
+            } else if (u.type === 'Base' || u.type === 'Barracks') {
+                // Square
+                ctx.fillStyle = color;
+                ctx.fillRect(ux + pad, uy + pad, sz, sz);
+                if (cs >= 20) {
+                    ctx.fillStyle = '#fff'; ctx.font = 'bold ' + Math.max(8, cs * 0.35) + 'px sans-serif';
+                    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                    ctx.fillText(u.type[0], ux + cs / 2, uy + cs / 2);
+                }
+            } else {
+                // Circle for mobile units
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.arc(ux + cs / 2, uy + cs / 2, sz / 2, 0, Math.PI * 2);
+                ctx.fill();
+                if (cs >= 20) {
+                    ctx.fillStyle = '#fff'; ctx.font = 'bold ' + Math.max(8, cs * 0.35) + 'px sans-serif';
+                    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                    ctx.fillText(u.type[0], ux + cs / 2, uy + cs / 2);
+                }
+            }
+        }
+
+        // --- Canvas interaction ---
+        function getCellFromEvent(e) {
+            var rect = canvas.getBoundingClientRect();
+            var cs = cellSize();
+            var x = Math.floor((e.clientX - rect.left) / cs);
+            var y = Math.floor((e.clientY - rect.top) / cs);
+            if (x < 0 || x >= mapW || y < 0 || y >= mapH) return null;
+            return { x: x, y: y };
+        }
+
+        function applyBrush(cell, erase) {
+            if (!cell) return;
+            if (erase) {
+                // Remove unit at cell, set terrain to ground
+                terrain[cell.y * mapW + cell.x] = 0;
+                units = units.filter(function(u) { return !(u.x === cell.x && u.y === cell.y); });
+            } else if (activeBrush.type === 'terrain') {
+                terrain[cell.y * mapW + cell.x] = activeBrush.value;
+                // Remove any unit on a wall
+                if (activeBrush.value === 1) {
+                    units = units.filter(function(u) { return !(u.x === cell.x && u.y === cell.y); });
+                }
+            } else {
+                // Place unit - clear terrain, remove existing unit at cell
+                terrain[cell.y * mapW + cell.x] = 0;
+                units = units.filter(function(u) { return !(u.x === cell.x && u.y === cell.y); });
+                units.push({
+                    type: activeBrush.unitType,
+                    player: activeBrush.player,
+                    x: cell.x, y: cell.y,
+                    resources: UNIT_RES[activeBrush.unitType],
+                    hitpoints: UNIT_HP[activeBrush.unitType]
+                });
+            }
+            draw();
+        }
+
+        canvas.addEventListener('mousedown', function(e) {
+            e.preventDefault();
+            if (e.button === 2) { erasing = true; painting = true; }
+            else { erasing = false; painting = true; }
+            applyBrush(getCellFromEvent(e), erasing);
+        });
+        canvas.addEventListener('mousemove', function(e) {
+            if (!painting) return;
+            applyBrush(getCellFromEvent(e), erasing);
+        });
+        canvas.addEventListener('mouseup', function() { painting = false; erasing = false; });
+        canvas.addEventListener('mouseleave', function() { painting = false; erasing = false; });
+        canvas.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+
+        // --- Toolbar actions ---
+        document.getElementById('btn-resize').addEventListener('click', function() {
+            var w = parseInt(widthInput.value) || 8;
+            var h = parseInt(heightInput.value) || 8;
+            w = Math.max(4, Math.min(64, w));
+            h = Math.max(4, Math.min(64, h));
+            // Preserve existing terrain/units that fit
+            var oldT = terrain.slice(), oldW = mapW, oldH = mapH, oldU = units.slice();
+            mapW = w; mapH = h;
+            terrain = [];
+            for (var i = 0; i < w * h; i++) terrain.push(0);
+            for (var y = 0; y < Math.min(oldH, h); y++) {
+                for (var x = 0; x < Math.min(oldW, w); x++) {
+                    terrain[y * w + x] = oldT[y * oldW + x];
+                }
+            }
+            units = oldU.filter(function(u) { return u.x < w && u.y < h; });
+            widthInput.value = w; heightInput.value = h;
+            resizeCanvas(); draw();
+        });
+
+        document.getElementById('btn-clear').addEventListener('click', function() {
+            initMap(mapW, mapH);
+        });
+
+        document.getElementById('btn-mirror-h').addEventListener('click', function() {
+            // Mirror left half to right half (horizontal)
+            var halfW = Math.floor(mapW / 2);
+            for (var y = 0; y < mapH; y++) {
+                for (var x = 0; x < halfW; x++) {
+                    terrain[y * mapW + (mapW - 1 - x)] = terrain[y * mapW + x];
+                }
+            }
+            // Mirror units: remove right-half units, duplicate left-half
+            var leftUnits = units.filter(function(u) { return u.x < halfW; });
+            var rightUnits = units.filter(function(u) { return u.x >= mapW - halfW; });
+            // Remove right-half units
+            units = units.filter(function(u) { return u.x < mapW - halfW; });
+            // Mirror left units to right
+            for (var i = 0; i < leftUnits.length; i++) {
+                var u = leftUnits[i];
+                var mx = mapW - 1 - u.x;
+                // Check no unit already there
+                var exists = units.some(function(eu) { return eu.x === mx && eu.y === u.y; });
+                if (!exists) {
+                    var np = u.player === 0 ? 1 : u.player === 1 ? 0 : -1;
+                    units.push({ type: u.type, player: np, x: mx, y: u.y, resources: u.resources, hitpoints: u.hitpoints });
+                }
+            }
+            draw();
+        });
+
+        document.getElementById('btn-mirror-d').addEventListener('click', function() {
+            // Mirror top-left to bottom-right (diagonal / rotational 180)
+            if (mapW !== mapH) { alert('Diagonal mirror requires square maps (width = height).'); return; }
+            var half = Math.floor(mapW * mapH / 2);
+            for (var y = 0; y < mapH; y++) {
+                for (var x = 0; x < mapW; x++) {
+                    var idx = y * mapW + x;
+                    if (idx >= half) {
+                        var mirrorIdx = (mapH - 1 - y) * mapW + (mapW - 1 - x);
+                        terrain[idx] = terrain[mirrorIdx];
+                    }
+                }
+            }
+            // Rotational mirror for units
+            var topUnits = units.filter(function(u) { return (u.y * mapW + u.x) < half; });
+            units = units.filter(function(u) { return (u.y * mapW + u.x) < half; });
+            for (var i = 0; i < topUnits.length; i++) {
+                var u = topUnits[i];
+                var mx = mapW - 1 - u.x, my = mapH - 1 - u.y;
+                var exists = units.some(function(eu) { return eu.x === mx && eu.y === my; });
+                if (!exists) {
+                    var np = u.player === 0 ? 1 : u.player === 1 ? 0 : -1;
+                    units.push({ type: u.type, player: np, x: mx, y: my, resources: u.resources, hitpoints: u.hitpoints });
+                }
+            }
+            draw();
+        });
+
+        // --- XML generation ---
+        function generateXML() {
+            var p0res = parseInt(document.getElementById('p0-res').value) || 0;
+            var p1res = parseInt(document.getElementById('p1-res').value) || 0;
+            var terrainStr = terrain.join('');
+            var xml = '<rts.PhysicalGameState width="' + mapW + '" height="' + mapH + '">\n';
+            xml += '  <terrain>' + terrainStr + '</terrain>\n';
+            xml += '  <players>\n';
+            xml += '    <rts.Player ID="0" resources="' + p0res + '">\n    </rts.Player>\n';
+            xml += '    <rts.Player ID="1" resources="' + p1res + '">\n    </rts.Player>\n';
+            xml += '  </players>\n';
+            xml += '  <units>\n';
+            for (var i = 0; i < units.length; i++) {
+                var u = units[i];
+                xml += '    <rts.units.Unit type="' + u.type + '" ID="' + (i + 2) + '" player="' + u.player + '" x="' + u.x + '" y="' + u.y + '" resources="' + (u.resources || 0) + '" hitpoints="' + u.hitpoints + '" >\n    </rts.units.Unit>\n';
+            }
+            xml += '  </units>\n';
+            xml += '</rts.PhysicalGameState>\n';
+            return xml;
+        }
+
+        document.getElementById('btn-export').addEventListener('click', function() {
+            var xml = generateXML();
+            xmlOutput.textContent = xml;
+            xmlOutput.classList.add('visible');
+            document.getElementById('meta-form').style.display = 'flex';
+        });
+
+        document.getElementById('btn-copy').addEventListener('click', function() {
+            var xml = generateXML();
+            navigator.clipboard.writeText(xml).then(function() {
+                alert('XML copied to clipboard!');
+            });
+        });
+
+        document.getElementById('btn-download').addEventListener('click', function() {
+            var xml = generateXML();
+            var name = document.getElementById('map-name').value || ('custom_' + mapW + 'x' + mapH);
+            name = name.replace(/[^a-zA-Z0-9_-]/g, '_');
+            var blob = new Blob([xml], { type: 'application/xml' });
+            var a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = name + '.xml';
+            a.click();
+            URL.revokeObjectURL(a.href);
+        });
+
+        document.getElementById('btn-import').addEventListener('click', function() {
+            document.getElementById('file-import').click();
+        });
+
+        document.getElementById('file-import').addEventListener('change', function(e) {
+            var file = e.target.files[0];
+            if (!file) return;
+            var reader = new FileReader();
+            reader.onload = function(ev) {
+                importXML(ev.target.result);
+            };
+            reader.readAsText(file);
+            e.target.value = '';
+        });
+
+        document.getElementById('btn-submit-pr').addEventListener('click', function() {
+            var name = document.getElementById('map-name').value;
+            if (!name) { alert('Please enter a map name.'); return; }
+            var safeName = name.replace(/[^a-zA-Z0-9_-]/g, '_');
+            var folder = mapW + 'x' + mapH;
+            var path = 'maps/' + folder + '/' + safeName + '.xml';
+            var desc = document.getElementById('map-desc').value || '';
+            var author = document.getElementById('map-author').value || '';
+            var title = 'Add map: ' + safeName + ' (' + mapW + 'x' + mapH + ')';
+            var body = 'New map submission: `' + path + '`\n\n';
+            if (author) body += 'Author: ' + author + '\n';
+            if (desc) body += '\n' + desc + '\n';
+            body += '\nGenerated with the MicroRTS Map Editor.';
+            var url = 'https://github.com/drchangliu/MicroRTS/issues/new?title=' + encodeURIComponent(title) + '&body=' + encodeURIComponent(body);
+            window.open(url, '_blank');
+        });
+
+        // --- XML import/parse ---
+        function importXML(xmlStr) {
+            try {
+                var parser = new DOMParser();
+                var doc = parser.parseFromString(xmlStr, 'text/xml');
+                var root = doc.querySelector('rts\\.PhysicalGameState') || doc.documentElement;
+                var w = parseInt(root.getAttribute('width'));
+                var h = parseInt(root.getAttribute('height'));
+                if (!w || !h) throw new Error('Invalid dimensions');
+
+                mapW = w; mapH = h;
+                widthInput.value = w; heightInput.value = h;
+
+                // Terrain
+                var terrainEl = root.querySelector('terrain');
+                var terrainStr = terrainEl ? terrainEl.textContent.trim() : '';
+                terrain = [];
+                for (var i = 0; i < w * h; i++) {
+                    terrain.push(terrainStr[i] === '1' ? 1 : 0);
+                }
+
+                // Players
+                var players = root.querySelectorAll('rts\\.Player');
+                for (var i = 0; i < players.length; i++) {
+                    var pid = parseInt(players[i].getAttribute('ID'));
+                    var res = parseInt(players[i].getAttribute('resources')) || 0;
+                    if (pid === 0) document.getElementById('p0-res').value = res;
+                    if (pid === 1) document.getElementById('p1-res').value = res;
+                }
+
+                // Units
+                units = [];
+                var unitEls = root.querySelectorAll('rts\\.units\\.Unit');
+                for (var i = 0; i < unitEls.length; i++) {
+                    var ue = unitEls[i];
+                    units.push({
+                        type: ue.getAttribute('type'),
+                        player: parseInt(ue.getAttribute('player')),
+                        x: parseInt(ue.getAttribute('x')),
+                        y: parseInt(ue.getAttribute('y')),
+                        resources: parseInt(ue.getAttribute('resources')) || 0,
+                        hitpoints: parseInt(ue.getAttribute('hitpoints')) || 1
+                    });
+                }
+
+                resizeCanvas();
+                draw();
+            } catch (err) {
+                alert('Failed to parse XML: ' + err.message);
+            }
+        }
+
+        // --- Gallery ---
+        function buildGallery() {
+            var gallery = document.getElementById('gallery');
+            gallery.innerHTML = '';
+            for (var i = 0; i < KNOWN_MAPS.length; i++) {
+                var m = KNOWN_MAPS[i];
+                var card = document.createElement('div');
+                card.className = 'gallery-card';
+                var c = document.createElement('canvas');
+                c.width = 160; c.height = 160;
+                card.appendChild(c);
+                var nameEl = document.createElement('div');
+                nameEl.className = 'card-name';
+                nameEl.textContent = m.name;
+                card.appendChild(nameEl);
+                var sizeEl = document.createElement('div');
+                sizeEl.className = 'card-size';
+                sizeEl.textContent = m.w + 'x' + m.h + ' - ' + m.path;
+                card.appendChild(sizeEl);
+                gallery.appendChild(card);
+
+                // Load map and render thumbnail
+                (function(mapInfo, cvs, cardEl) {
+                    fetchMapXML(mapInfo.path, function(xmlStr) {
+                        if (xmlStr) {
+                            renderThumbnail(cvs, xmlStr);
+                            cardEl.addEventListener('click', function() {
+                                importXML(xmlStr);
+                                // Switch to editor tab
+                                for (var j = 0; j < tabBtns.length; j++) tabBtns[j].classList.remove('active');
+                                tabBtns[0].classList.add('active');
+                                var tabs = document.querySelectorAll('.map-tab-content');
+                                for (var j = 0; j < tabs.length; j++) tabs[j].classList.remove('active');
+                                document.getElementById('tab-editor').classList.add('active');
+                            });
+                        }
+                    });
+                })(m, c, card);
+            }
+        }
+
+        function fetchMapXML(path, cb) {
+            // Try raw GitHub URL
+            var url = 'https://raw.githubusercontent.com/drchangliu/MicroRTS/master/' + path;
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', url, true);
+            xhr.onload = function() {
+                if (xhr.status === 200) cb(xhr.responseText);
+                else cb(null);
+            };
+            xhr.onerror = function() { cb(null); };
+            xhr.send();
+        }
+
+        function renderThumbnail(cvs, xmlStr) {
+            try {
+                var parser = new DOMParser();
+                var doc = parser.parseFromString(xmlStr, 'text/xml');
+                var root = doc.querySelector('rts\\.PhysicalGameState') || doc.documentElement;
+                var w = parseInt(root.getAttribute('width'));
+                var h = parseInt(root.getAttribute('height'));
+                var terrainEl = root.querySelector('terrain');
+                var terrainStr = terrainEl ? terrainEl.textContent.trim() : '';
+                var unitEls = root.querySelectorAll('rts\\.units\\.Unit');
+
+                var tctx = cvs.getContext('2d');
+                var cs = Math.min(cvs.width / w, cvs.height / h);
+                var ox = (cvs.width - w * cs) / 2;
+                var oy = (cvs.height - h * cs) / 2;
+
+                tctx.fillStyle = COLORS.ground;
+                tctx.fillRect(0, 0, cvs.width, cvs.height);
+
+                for (var y = 0; y < h; y++) {
+                    for (var x = 0; x < w; x++) {
+                        if (terrainStr[y * w + x] === '1') {
+                            tctx.fillStyle = COLORS.wall;
+                            tctx.fillRect(ox + x * cs, oy + y * cs, cs, cs);
+                        }
+                    }
+                }
+
+                for (var i = 0; i < unitEls.length; i++) {
+                    var ue = unitEls[i];
+                    var type = ue.getAttribute('type');
+                    var player = parseInt(ue.getAttribute('player'));
+                    var ux = parseInt(ue.getAttribute('x'));
+                    var uy = parseInt(ue.getAttribute('y'));
+                    var color = player === 0 ? COLORS.p0 : player === 1 ? COLORS.p1 : COLORS.neutral;
+                    var px = ox + ux * cs, py = oy + uy * cs;
+                    var pad = cs * 0.1, sz = cs - pad * 2;
+
+                    if (type === 'Resource') {
+                        tctx.fillStyle = COLORS.resource;
+                        var cx = px + cs / 2, cy = py + cs / 2, r = sz / 2;
+                        tctx.beginPath();
+                        tctx.moveTo(cx, cy - r); tctx.lineTo(cx + r, cy);
+                        tctx.lineTo(cx, cy + r); tctx.lineTo(cx - r, cy);
+                        tctx.closePath(); tctx.fill();
+                    } else if (type === 'Base' || type === 'Barracks') {
+                        tctx.fillStyle = color;
+                        tctx.fillRect(px + pad, py + pad, sz, sz);
+                    } else {
+                        tctx.fillStyle = color;
+                        tctx.beginPath();
+                        tctx.arc(px + cs / 2, py + cs / 2, sz / 2, 0, Math.PI * 2);
+                        tctx.fill();
+                    }
+                }
+            } catch (e) {}
+        }
+
+        // --- Init ---
+        buildPalette();
+        initMap(8, 8);
+    })();
+    </script>
+</body>
+</html>

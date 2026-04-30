@@ -1,0 +1,158 @@
+name: PR Submission Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [master]
+
+permissions:
+  pull-requests: write
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Detect changed submissions
+        id: detect
+        run: |
+          # Find submissions changed in this PR vs base branch
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- submissions/ | \
+            grep -oP '^submissions/[^/]+' | sort -u || true)
+
+          if [ -z "$CHANGED" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No submission changes detected."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            # Write dirs to a file for the next step
+            echo "$CHANGED" > /tmp/changed_submissions.txt
+            echo "Changed submissions:"
+            cat /tmp/changed_submissions.txt
+          fi
+
+      - name: Skip if no submissions changed
+        if: steps.detect.outputs.changed == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: '🤖 **Automated Check:** No submission changes detected in this PR. Skipping validation.'
+            });
+
+      - name: Validate submissions
+        if: steps.detect.outputs.changed == 'true'
+        id: validate
+        run: |
+          ALL_PASS=true
+          REPORT=""
+
+          while IFS= read -r sub_dir; do
+            echo "Validating: $sub_dir"
+            OUTPUT=$(python3 tournament/validate_submission.py "$sub_dir" 2>&1) || {
+              ALL_PASS=false
+            }
+            REPORT="${REPORT}\n### \`${sub_dir}\`\n\`\`\`\n${OUTPUT}\n\`\`\`\n"
+          done < /tmp/changed_submissions.txt
+
+          # Save report for comment step
+          echo "$REPORT" > /tmp/validation_report.txt
+          echo "all_pass=$ALL_PASS" >> "$GITHUB_OUTPUT"
+
+          # Also extract team info for the comment
+          TEAMS=""
+          while IFS= read -r sub_dir; do
+            META="$sub_dir/metadata.json"
+            if [ -f "$META" ]; then
+              TEAM=$(python3 -c "import json; m=json.load(open('$META')); print(f\"{m.get('display_name','?')} ({m.get('agent_class','?')}, {m.get('model_provider','?')}/{m.get('model_name','?')})\")" 2>/dev/null || echo "unknown")
+              TEAMS="${TEAMS}- ${TEAM}\n"
+            fi
+          done < /tmp/changed_submissions.txt
+          echo "$TEAMS" > /tmp/team_info.txt
+
+      - name: Comment on success
+        if: steps.detect.outputs.changed == 'true' && steps.validate.outputs.all_pass == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('/tmp/validation_report.txt', 'utf8');
+            const teams = fs.readFileSync('/tmp/team_info.txt', 'utf8');
+
+            const body = `🤖 **Automated Submission Check — PASSED** ✅
+
+            **Submissions validated:**
+            ${teams}
+
+            <details>
+            <summary>Validation details</summary>
+
+            ${report}
+
+            </details>
+
+            ---
+            *This is an automated check. The tournament will run automatically after merge.*`;
+
+            try {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            } catch (e) {
+              console.log('Could not comment (fork PR permissions): ' + e.message);
+            }
+
+      - name: Comment on failure
+        if: steps.detect.outputs.changed == 'true' && steps.validate.outputs.all_pass == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('/tmp/validation_report.txt', 'utf8');
+
+            const body = `🤖 **Automated Submission Check — FAILED** ❌
+
+            One or more submissions failed validation. Please fix the errors below and push again.
+
+            ${report}
+
+            **Common issues:**
+            - \`metadata.json\` missing required fields
+            - Package declaration doesn't match expected format
+            - Missing \`UnitTypeTable\` constructor
+            - Forbidden API usage (see \`tournament/validate_submission.py\`)
+
+            ---
+            *This is an automated check. Fix the issues and push to re-trigger validation.*`;
+
+            try {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            } catch (e) {
+              console.log('Could not comment (fork PR permissions): ' + e.message);
+            }
+
+      - name: Fail workflow on validation errors
+        if: steps.detect.outputs.changed == 'true' && steps.validate.outputs.all_pass == 'false'
+        run: exit 1

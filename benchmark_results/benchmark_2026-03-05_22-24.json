@@ -1,0 +1,90 @@
+{
+  "version": "2.0",
+  "format": "single-elimination",
+  "date": "2026-03-05T22:24:38.903421",
+  "config": {
+    "map": "maps/8x8/basesWorkers8x8.xml",
+    "max_cycles": 1500,
+    "games_per_matchup": 1
+  },
+  "anchors": {
+    "ai.RandomBiasedAI": {
+      "name": "RandomBiasedAI",
+      "weight": 10,
+      "tier": "easy"
+    },
+    "ai.abstraction.HeavyRush": {
+      "name": "HeavyRush",
+      "weight": 20,
+      "tier": "medium-hard"
+    },
+    "ai.abstraction.LightRush": {
+      "name": "LightRush",
+      "weight": 15,
+      "tier": "medium"
+    },
+    "ai.abstraction.WorkerRush": {
+      "name": "WorkerRush",
+      "weight": 15,
+      "tier": "medium"
+    },
+    "ai.competition.tiamat.Tiamat": {
+      "name": "Tiamat",
+      "weight": 20,
+      "tier": "hard"
+    },
+    "ai.coac.CoacAI": {
+      "name": "CoacAI",
+      "weight": 20,
+      "tier": "hard"
+    }
+  },
+  "benchmark_scores": {
+    "PenguinBot v2 (Search+LLM)": 22.0
+  },
+  "eliminated_at": {
+    "PenguinBot v2 (Search+LLM)": "HeavyRush"
+  },
+  "opponent_breakdown": {
+    "PenguinBot v2 (Search+LLM)": {
+      "RandomBiasedAI": {
+        "wins": 1,
+        "draws": 0,
+        "losses": 0,
+        "avg_game_score": 1.2,
+        "weighted_points": 12.0
+      },
+      "HeavyRush": {
+        "wins": 0,
+        "draws": 1,
+        "losses": 0,
+        "avg_game_score": 0.5,
+        "weighted_points": 10.0
+      }
+    }
+  },
+  "detailed_results": {
+    "PenguinBot v2 (Search+LLM)": {
+      "reference_games": {
+        "ai.RandomBiasedAI": [
+          {
+            "result": "win",
+            "ticks": 515,
+            "game_num": 1,
+            "opponent": "RandomBiasedAI"
+          }
+        ],
+        "ai.abstraction.HeavyRush": [
+          {
+            "result": "draw",
+            "ticks": 1500,
+            "game_num": 1,
+            "opponent": "HeavyRush"
+          }
+        ]
+      },
+      "llm_games": []
+    }
+  },
+  "head_to_head": []
+}

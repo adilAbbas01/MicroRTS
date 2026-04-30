@@ -123,7 +123,104 @@ h2 {
 .section-desc {
     color: var(--text-secondary);
     font-size: 0.9rem;
-    margin-bottom: 1.25rem;
+    margin-bottom: 1rem;
+}
+
+/* Toolbar: search + date filter on one line */
+.toolbar {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    margin-bottom: 0.75rem;
+    flex-wrap: nowrap;
+}
+
+.search-input {
+    flex: 1 1 200px;
+    min-width: 120px;
+    padding: 0.4rem 0.65rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    outline: none;
+    transition: border-color 0.15s;
+}
+
+.search-input:focus {
+    border-color: var(--accent);
+}
+
+.search-input::placeholder {
+    color: var(--text-muted);
+}
+
+.date-label {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    flex-shrink: 0;
+}
+
+.date-input {
+    padding: 0.35rem 0.5rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 0.8rem;
+    outline: none;
+    color-scheme: dark;
+    flex-shrink: 0;
+}
+
+.date-input:focus {
+    border-color: var(--accent);
+}
+
+.btn-filter {
+    background: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    color: #000;
+    cursor: pointer;
+    padding: 0.35rem 0.75rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    line-height: 1.2;
+    flex-shrink: 0;
+    transition: background 0.15s;
+}
+
+.btn-filter:hover {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+}
+
+.btn-clear {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 0.35rem 0.55rem;
+    font-size: 0.85rem;
+    line-height: 1;
+    flex-shrink: 0;
+    transition: background 0.15s, color 0.15s;
+}
+
+.btn-clear:hover {
+    background: var(--border);
+    color: var(--text-primary);
+}
+
+/* Result count */
+.result-count {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    margin-top: 0.5rem;
+    padding-left: 0.25rem;
 }
 
 /* Tables */
@@ -150,6 +247,39 @@ th {
     color: var(--text-primary);
     border-bottom: 1px solid var(--border);
     white-space: nowrap;
+}
+
+/* Sortable column headers */
+th[data-sort] {
+    cursor: pointer;
+    user-select: none;
+    position: relative;
+    padding-right: 1.4rem;
+    transition: color 0.15s;
+}
+
+th[data-sort]:hover {
+    color: var(--accent);
+}
+
+th[data-sort]::after {
+    content: '\2195';
+    position: absolute;
+    right: 0.4rem;
+    opacity: 0.3;
+    font-size: 0.75rem;
+}
+
+th[data-sort].sort-asc::after {
+    content: '\2191';
+    opacity: 0.9;
+    color: var(--accent);
+}
+
+th[data-sort].sort-desc::after {
+    content: '\2193';
+    opacity: 0.9;
+    color: var(--accent);
 }
 
 td {
@@ -202,6 +332,17 @@ tbody tr:hover {
     font-weight: 500;
 }
 
+/* Date column */
+.date-cell {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+}
+
+.date-cell .time-ago {
+    color: var(--text-muted);
+    font-size: 0.75rem;
+}
+
 /* H2H matrix */
 #h2h-table th,
 #h2h-table td {
@@ -218,6 +359,142 @@ tbody tr:hover {
 .h2h-self {
     background: var(--bg-tertiary);
     color: var(--text-muted);
+}
+
+/* Clickable table rows (leaderboard, benchmarks, history tables only) */
+#leaderboard-table tbody tr,
+#benchmarks-table tbody tr,
+#history-table tbody tr {
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+tr.detail-row {
+    cursor: default;
+}
+
+tr.detail-row td {
+    padding: 0;
+    border-bottom: 1px solid var(--border);
+}
+
+tr.detail-row:hover {
+    background: inherit;
+}
+
+tr.active-row {
+    background: var(--bg-secondary);
+}
+
+/* Detail panel (expanded below a clicked row) */
+.detail-panel {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1rem 1.25rem;
+    margin: 0.5rem 0.75rem;
+}
+
+.detail-panel h4 {
+    margin: 0 0 0.75rem 0;
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+}
+
+.game-cards {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+}
+
+.game-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    min-width: 160px;
+    flex: 0 1 auto;
+}
+
+.game-card .opponent-name {
+    font-weight: 600;
+    font-size: 0.85rem;
+    margin-bottom: 0.35rem;
+}
+
+.game-card .result-badge {
+    display: inline-block;
+    padding: 0.1rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    margin-bottom: 0.35rem;
+}
+
+.game-card .result-badge.badge-win { background: var(--win); color: #000; }
+.game-card .result-badge.badge-loss { background: var(--loss); color: #000; }
+.game-card .result-badge.badge-draw { background: var(--draw); color: #000; }
+.game-card .result-badge.badge-skip { background: var(--bg-tertiary); color: var(--text-muted); }
+
+.game-card .game-pts {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.5rem;
+}
+
+.replay-btn {
+    display: inline-block;
+    padding: 0.25rem 0.6rem;
+    background: var(--accent);
+    color: #000;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-decoration: none;
+    transition: background 0.15s;
+}
+
+.replay-btn:hover {
+    background: var(--accent-hover);
+    text-decoration: none;
+}
+
+/* Per-map score chips in detail panel */
+.map-scores-section {
+    margin-bottom: 0.75rem;
+}
+
+.map-scores-section h5 {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-bottom: 0.4rem;
+    font-weight: 500;
+}
+
+.map-score-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.map-score-chip {
+    display: inline-block;
+    padding: 0.25rem 0.6rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.map-score-chip strong {
+    color: var(--text-primary);
+}
+
+.map-score-chip .grade {
+    font-size: 0.7rem;
+    padding: 0.1rem 0.3rem;
+    vertical-align: middle;
 }
 
 /* Source badge */
@@ -378,5 +655,14 @@ footer a:hover {
 
     .page-content {
         padding: 1rem;
+    }
+
+    .toolbar {
+        flex-wrap: wrap;
+    }
+
+    .search-input {
+        flex-basis: 100%;
+        min-width: 0;
     }
 }

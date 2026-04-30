@@ -56,6 +56,7 @@ def load_benchmark_entries():
             "source": "benchmark",
             "team_name": None,
             "display_name": entry.get("model", "Unknown"),
+            "agent_class": entry.get("agent_class", ""),
             "model_provider": "ollama",
             "model_name": entry.get("model", "").split(" (")[0],
             "agent_type": entry.get("agent_type", entry.get("format", "unknown")),
@@ -83,11 +84,19 @@ def load_tournament_entries():
             data = json.load(f)
 
         for team in data.get("results", []):
+            # Determine map string for display
+            maps = team.get("maps", [])
+            if maps:
+                map_display = ", ".join(maps)
+            else:
+                map_display = team.get("map", data.get("config", {}).get("map", ""))
+
             entries.append({
                 "source": "tournament",
                 "source_file": result_file.name,
                 "team_name": team.get("team_name"),
                 "display_name": team.get("display_name", team.get("team_name", "Unknown")),
+                "agent_class": team.get("agent_class", ""),
                 "model_provider": team.get("model_provider", "unknown"),
                 "model_name": team.get("model_name", "unknown"),
                 "agent_type": "submission",
@@ -95,7 +104,9 @@ def load_tournament_entries():
                 "grade": team.get("grade", score_to_grade(team.get("score", 0))),
                 "eliminated_at": team.get("eliminated_at"),
                 "date": team.get("date", data.get("date", "")),
-                "map": team.get("map", data.get("config", {}).get("map", "")),
+                "map": map_display,
+                "maps": maps,
+                "map_scores": team.get("map_scores", {}),
                 "games_per_matchup": team.get("games_per_matchup",
                                                data.get("config", {}).get("games_per_matchup", 1)),
                 "opponents": team.get("opponents", {})
@@ -107,13 +118,29 @@ def load_tournament_entries():
 def build_leaderboard(entries):
     """
     Build the leaderboard: best score per unique display_name.
+    Also tracks the most recent evaluation date per entry (last_updated).
     Returns sorted list of entries (highest score first).
     """
     best = {}
+    latest_date = {}  # track most recent date per display_name
     for entry in entries:
         key = entry["display_name"]
         if key not in best or entry["score"] > best[key]["score"]:
-            best[key] = entry
+            best[key] = dict(entry)  # copy to avoid mutation
+        # Track the most recent date this entry was evaluated
+        entry_date = entry.get("date", "")
+        if key not in latest_date or entry_date > latest_date[key]:
+            latest_date[key] = entry_date
+
+    # Add last_updated and synthesize map_scores for single-map entries
+    for key, entry in best.items():
+        entry["last_updated"] = latest_date.get(key, entry.get("date", ""))
+        if not entry.get("map_scores"):
+            raw_map = entry.get("map", "")
+            if "8x8" in raw_map:
+                entry["map_scores"] = {"8x8": {"score": entry["score"], "grade": entry["grade"]}}
+            elif "16x16" in raw_map:
+                entry["map_scores"] = {"16x16": {"score": entry["score"], "grade": entry["grade"]}}
 
     return sorted(best.values(), key=lambda x: x["score"], reverse=True)
 
@@ -123,14 +150,26 @@ def build_history(entries):
     # Group by date
     history = []
     for entry in sorted(entries, key=lambda x: x.get("date", ""), reverse=True):
-        history.append({
+        h = {
             "display_name": entry["display_name"],
             "score": entry["score"],
             "grade": entry["grade"],
             "date": entry.get("date", ""),
             "source": entry.get("source", "unknown"),
             "map": entry.get("map", ""),
-        })
+            "agent_class": entry.get("agent_class", ""),
+            "opponents": entry.get("opponents", {}),
+        }
+        if entry.get("map_scores"):
+            h["map_scores"] = entry["map_scores"]
+        else:
+            # Synthesize map_scores for single-map entries (e.g. old benchmarks)
+            raw_map = entry.get("map", "")
+            if "8x8" in raw_map:
+                h["map_scores"] = {"8x8": {"score": entry["score"], "grade": entry["grade"]}}
+            elif "16x16" in raw_map:
+                h["map_scores"] = {"16x16": {"score": entry["score"], "grade": entry["grade"]}}
+        history.append(h)
     return history
 
 
@@ -193,9 +232,14 @@ def main():
     site_data = {
         "generated": datetime.now().isoformat(),
         "anchors": ANCHORS,
+        "maps": [
+            {"path": "maps/8x8/basesWorkers8x8.xml", "label": "8x8"},
+            {"path": "maps/16x16/basesWorkers16x16.xml", "label": "16x16"},
+        ],
         "scoring": {
             "max_score": 100,
-            "format": "single-elimination",
+            "format": "single-elimination-multimap",
+            "description": "Average of per-map scores (each 0-100)",
             "grades": {
                 "A+": "90-100",
                 "A": "80-89",

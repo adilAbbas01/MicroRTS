@@ -5,6 +5,40 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Submit Agent - MicroRTS LLM Competition</title>
     <link rel="stylesheet" href="style.css">
+    <style>
+        /* Submission Status tab styles */
+        .submit-tabs { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; }
+        .submit-tab { padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer;
+            background: transparent; border: 1px solid var(--border); color: var(--text-secondary);
+            font-size: 0.9rem; transition: background 0.15s, color 0.15s; }
+        .submit-tab:hover { color: var(--text-primary); background: var(--bg-tertiary); }
+        .submit-tab.active { color: var(--text-primary); background: var(--bg-tertiary); font-weight: 500; border-color: var(--accent); }
+        .submit-tab-content { display: none; }
+        .submit-tab-content.active { display: block; }
+        .status-badge { display: inline-block; padding: 0.15rem 0.55rem; border-radius: 12px;
+            font-weight: 600; font-size: 0.75rem; min-width: 3rem; text-align: center; }
+        .status-new { background: #58a6ff; color: #000; }
+        .status-review { background: #d29922; color: #000; }
+        .status-waiting { background: #f97583; color: #000; }
+        .status-accepted { background: #3fb950; color: #000; }
+        .status-closed { background: #8b949e; color: #000; }
+        .pr-link { color: var(--accent); text-decoration: none; }
+        .pr-link:hover { text-decoration: underline; }
+        .pr-author { color: var(--text-secondary); font-size: 0.85rem; }
+        .pr-date { color: var(--text-muted); font-size: 0.8rem; }
+        .loading-msg { color: var(--text-muted); font-style: italic; padding: 1rem 0; }
+        .error-msg { color: var(--loss); padding: 1rem 0; }
+        .status-legend { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; font-size: 0.8rem; color: var(--text-secondary); }
+        .status-legend-item { display: flex; align-items: center; gap: 0.35rem; }
+        #status-table { table-layout: fixed; width: 100%; }
+        #status-table th:nth-child(1) { width: 3.5rem; }
+        #status-table th:nth-child(2) { width: 40%; }
+        #status-table th:nth-child(3) { width: 10%; }
+        #status-table th:nth-child(4) { width: 10%; }
+        #status-table th:nth-child(5) { width: 6.5rem; }
+        #status-table th:nth-child(6) { width: 6.5rem; }
+        .title-cell { max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    </style>
 </head>
 <body>
     <header>
@@ -15,13 +49,19 @@
                 <a href="index.html">Leaderboard</a>
                 <a href="submit.html" class="tab active">Submit Agent</a>
                 <a href="rules.html">Rules</a>
+                <a href="match.html">Run Match</a>
+                <a href="maps.html">Maps</a>
             </nav>
         </div>
     </header>
 
-    <div class="page-content">
-        <a href="index.html" class="back-link">&larr; Back to Leaderboard</a>
+    <div class="page-content" style="max-width:1000px;">
+        <div class="submit-tabs">
+            <button class="submit-tab active" data-target="guide-content">Submission Guide</button>
+            <button class="submit-tab" data-target="status-content">Submission Status</button>
+        </div>
 
+        <div id="guide-content" class="submit-tab-content active">
         <h1>How to Submit Your Agent</h1>
 
         <h2>Step 1: Fork the Repository</h2>
@@ -57,9 +97,11 @@
                 <tr><td><code>agent_class</code></td><td>Java class name (must match filename)</td></tr>
                 <tr><td><code>agent_file</code></td><td>Java source file</td></tr>
                 <tr><td><code>model_provider</code></td><td><code>ollama</code>, <code>gemini</code>, <code>openai</code>, <code>deepseek</code>, or <code>none</code></td></tr>
-                <tr><td><code>model_name</code></td><td>Model identifier (e.g., <code>llama3.1:8b</code>)</td></tr>
+                <tr><td><code>model_name</code></td><td>Your preferred model identifier (e.g., <code>llama3.1:8b</code>). See note below.</td></tr>
             </tbody>
         </table>
+
+        <p><strong>Model availability note:</strong> You are welcome to specify any preferred model in <code>model_name</code>. However, official competition runs are executed on the organizers' server using locally available models. If your preferred model is not available, your agent will be run with whatever model is on hand &mdash; currently <code>llama3.1:8b</code>. If your model preference differs, note it in your PR description so organizers are aware.</p>
 
         <h2>Step 4: Implement Your Agent</h2>
         <p>Two agent types are supported:</p>
@@ -117,7 +159,94 @@ java -cp "lib/*:bin" rts.MicroRTS -f resources/config.properties
 # Validate your submission
 python3 tournament/validate_submission.py submissions/your-team-name/</code></pre>
 
-        <h2>Step 6: Submit a Pull Request</h2>
+        <h2>Step 5b: Run Benchmark or Tournament Locally</h2>
+        <p>Before submitting, you can run the same evaluation tools used for official scoring to preview your results.</p>
+
+        <h3>Option A: Benchmark Arena (built-in agents)</h3>
+        <p>The benchmark arena runs a single-elimination gauntlet against 6 reference AIs in ascending difficulty (RandomBiasedAI &rarr; HeavyRush &rarr; LightRush &rarr; WorkerRush &rarr; Tiamat &rarr; CoacAI). Your agent must <strong>win</strong> each round to advance. The final score is 0&ndash;100.</p>
+        <pre><code># Prerequisites: Ollama running with your model pulled
+ollama serve &amp;
+ollama pull llama3.1:8b
+
+# Build first
+ant build
+
+# Run the benchmark arena (default: 1 game per opponent)
+python3 benchmark_arena.py
+
+# Run with multiple games per matchup for more reliable results
+python3 benchmark_arena.py --games 3</code></pre>
+        <p>Environment variables:</p>
+        <table>
+            <thead><tr><th>Variable</th><th>Description</th><th>Default</th></tr></thead>
+            <tbody>
+                <tr><td><code>OLLAMA_MODEL</code></td><td>Model for <code>ollama</code> agent</td><td><code>llama3.1:8b</code></td></tr>
+                <tr><td><code>OLLAMA_MODEL_P2</code></td><td>Model for <code>ollama2</code> agent</td><td><code>qwen3:4b</code></td></tr>
+                <tr><td><code>GEMINI_API_KEY</code></td><td>Enable Gemini agent benchmarking</td><td>(not set)</td></tr>
+            </tbody>
+        </table>
+        <p>Results are saved to <code>benchmark_results/</code> as JSON and Markdown.</p>
+
+        <h3>Option B: Tournament Runner (submitted agents)</h3>
+        <p>The tournament runner evaluates <strong>submission folders</strong>&mdash;the same pipeline used for official competition scoring. It discovers all valid submissions under <code>submissions/</code>, installs them, compiles the project, and runs single-elimination on multiple maps (8x8 + 16x16).</p>
+        <pre><code># Build and run the tournament over all submissions
+python3 tournament/run_tournament.py
+
+# Run with multiple games per matchup
+python3 tournament/run_tournament.py --games 3
+
+# Skip head-to-head games between submissions
+python3 tournament/run_tournament.py --skip-h2h
+
+# Use a custom submissions directory
+python3 tournament/run_tournament.py --submissions-dir submissions/</code></pre>
+        <p>To test only your submission, you can point to a directory containing just your team folder:</p>
+        <pre><code>mkdir -p my-test/your-team-name
+cp -r submissions/your-team-name/* my-test/your-team-name/
+python3 tournament/run_tournament.py --submissions-dir my-test --skip-h2h</code></pre>
+        <p>Results are saved to <code>tournament_results/</code> as JSON.</p>
+
+        <h3>Option C: Quick Benchmark Script</h3>
+        <p>For a simpler smoke test of built-in LLM agents against RandomBiasedAI:</p>
+        <pre><code># Runs 2 games each for llama3.1:8b and qwen3:14b
+./benchmark.sh</code></pre>
+
+        <h2>Step 6: Include Self-Reported Results (Optional)</h2>
+        <p>You can include a <code>results.json</code> file in your submission folder with benchmark results you ran yourself using your preferred model. This lets reviewers see how your agent performs with a more capable model, and helps distinguish whether a lower official score is a model-capability issue vs. a prompt/strategy issue.</p>
+        <p>Run the benchmark arena against the six built-in leaderboard opponents and fill in the results:</p>
+        <pre><code>export OLLAMA_MODEL="your-preferred-model"
+python3 benchmark_arena.py</code></pre>
+        <p>Then create <code>submissions/your-team-name/results.json</code>:</p>
+        <pre><code>{
+  "self_reported": true,
+  "submitter": "your-team-name",
+  "agent_class": "ai.abstraction.submissions.your_team.YourAgent",
+  "model": "your-preferred-model",
+  "hardware": "e.g. Apple M2 Pro, CPU only",
+  "date": "2026-03-01",
+  "notes": "Optional notes about your setup.",
+
+  "version": "2.0",
+  "format": "single-elimination",
+  "map": "maps/8x8/basesWorkers8x8.xml",
+  "max_cycles": 5000,
+  "games_per_matchup": 1,
+
+  "score": 69.0,
+  "grade": "C",
+  "eliminated_at": "Tiamat",
+
+  "opponents": {
+    "RandomBiasedAI": { "wins": 1, "draws": 0, "losses": 0, "avg_game_score": 1.2, "weighted_points": 12.0 },
+    "HeavyRush":      { "wins": 1, "draws": 0, "losses": 0, "avg_game_score": 1.1, "weighted_points": 22.0 },
+    "LightRush":      { "wins": 1, "draws": 0, "losses": 0, "avg_game_score": 1.2, "weighted_points": 18.0 },
+    "WorkerRush":     { "wins": 1, "draws": 0, "losses": 0, "avg_game_score": 1.0, "weighted_points": 15.0 },
+    "Tiamat":         { "wins": 0, "draws": 0, "losses": 1, "avg_game_score": 0.0, "weighted_points": 0.0  }
+  }
+}</code></pre>
+        <p>Self-reported results are <strong>not verified</strong> and are separate from official scores. Only report results against the six built-in leaderboard opponents, not against other submissions. See <code>src/ai/abstraction/submissions/example_team/results.json</code> for a complete example.</p>
+
+        <h2>Step 7: Submit a Pull Request</h2>
         <p>Push your changes and open a PR against the <code>master</code> branch. Your PR should only contain files inside <code>submissions/your-team-name/</code>.</p>
         <p>Maintainers will review your submission for security compliance and add it to the next tournament run.</p>
 
@@ -131,12 +260,192 @@ python3 tournament/validate_submission.py submissions/your-team-name/</code></pr
             <li>Dynamic class loading / reflection</li>
             <li>Thread creation</li>
         </ul>
+        </div><!-- end guide-content -->
+
+        <div id="status-content" class="submit-tab-content">
+            <h1>Submission Status</h1>
+            <p style="color: var(--text-secondary); margin-bottom: 1rem;">
+                Live status of all pull request submissions to the
+                <a href="https://github.com/drchangliu/MicroRTS/pulls" style="color: var(--accent)">MicroRTS repository</a>.
+            </p>
+            <div class="status-legend">
+                <span class="status-legend-item"><span class="status-badge status-new">New</span> Awaiting review</span>
+                <span class="status-legend-item"><span class="status-badge status-review">Under Review</span> Author responded</span>
+                <span class="status-legend-item"><span class="status-badge status-waiting">Waiting for Author</span> Revision needed</span>
+                <span class="status-legend-item"><span class="status-badge status-accepted">Accepted</span> Merged</span>
+                <span class="status-legend-item"><span class="status-badge status-closed">Closed</span> Not merged</span>
+            </div>
+            <div id="status-loading" class="loading-msg">Loading submissions from GitHub...</div>
+            <div id="status-error" class="error-msg" style="display:none;"></div>
+            <div class="table-container" id="status-table-wrap" style="display:none;">
+                <table id="status-table">
+                    <thead>
+                        <tr>
+                            <th>PR</th>
+                            <th>Title</th>
+                            <th>Author</th>
+                            <th>Status</th>
+                            <th>Opened</th>
+                            <th>Updated</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div><!-- end status-content -->
     </div>
 
     <footer>
         <div class="footer-content">
-            <p><a href="https://github.com/drchangliu/MicroRTS/">MicroRTS</a> &mdash; IEEE WCCI 2026 LLM Game AI Competition</p>
+            <p><a href="https://github.com/drchangliu/MicroRTS/">MicroRTS</a> &mdash; <a href="https://github.com/drchangliu/MicroRTS/blob/master/COMPETITION.md">IEEE WCCI 2026 LLM Game AI Competition</a></p>
         </div>
     </footer>
+
+    <script>
+    (function () {
+        'use strict';
+
+        var REPO_OWNER = 'drchangliu';
+        var REPO_NAME = 'MicroRTS';
+        var API_BASE = 'https://api.github.com/repos/' + REPO_OWNER + '/' + REPO_NAME;
+
+        // Tab switching
+        var tabs = document.querySelectorAll('.submit-tab');
+        for (var i = 0; i < tabs.length; i++) {
+            tabs[i].addEventListener('click', function () {
+                for (var j = 0; j < tabs.length; j++) tabs[j].classList.remove('active');
+                this.classList.add('active');
+                var contents = document.querySelectorAll('.submit-tab-content');
+                for (var j = 0; j < contents.length; j++) contents[j].classList.remove('active');
+                var target = document.getElementById(this.getAttribute('data-target'));
+                if (target) target.classList.add('active');
+                // Load status data on first click
+                if (this.getAttribute('data-target') === 'status-content' && !statusLoaded) {
+                    loadSubmissionStatus();
+                }
+            });
+        }
+
+        // Activate tab from URL hash
+        if (window.location.hash === '#status') {
+            var statusTab = document.querySelector('.submit-tab[data-target="status-content"]');
+            if (statusTab) statusTab.click();
+        }
+
+        var statusLoaded = false;
+
+        function escapeHtml(str) {
+            if (str == null) return '';
+            return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        function formatDate(dateStr) {
+            if (!dateStr) return '--';
+            try {
+                return new Date(dateStr).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+            } catch (e) { return dateStr.substring(0, 10); }
+        }
+
+        function determineStatus(pr, comments) {
+            // Merged
+            if (pr.merged_at) return { label: 'Accepted', cls: 'status-accepted' };
+            // Closed without merge
+            if (pr.state === 'closed') return { label: 'Closed', cls: 'status-closed' };
+            // Open PR with no comments = New
+            if (!comments || comments.length === 0) return { label: 'New', cls: 'status-new' };
+
+            // Find last comment from repo owner vs PR author
+            var lastOwnerComment = null;
+            var lastAuthorComment = null;
+            var prAuthor = pr.user.login.toLowerCase();
+
+            for (var i = 0; i < comments.length; i++) {
+                var c = comments[i];
+                var commenter = c.user.login.toLowerCase();
+                var assoc = c.author_association;
+                if (assoc === 'OWNER' || assoc === 'MEMBER' || assoc === 'COLLABORATOR') {
+                    lastOwnerComment = c;
+                } else if (commenter === prAuthor) {
+                    lastAuthorComment = c;
+                }
+            }
+
+            // No owner comment yet = still New
+            if (!lastOwnerComment) return { label: 'New', cls: 'status-new' };
+
+            // Owner commented; did author respond after?
+            if (lastAuthorComment && new Date(lastAuthorComment.created_at) > new Date(lastOwnerComment.created_at)) {
+                return { label: 'Under Review', cls: 'status-review' };
+            }
+
+            return { label: 'Waiting for Author', cls: 'status-waiting' };
+        }
+
+        function renderTable(prsWithStatus) {
+            var tbody = document.querySelector('#status-table tbody');
+            tbody.innerHTML = '';
+
+            // Sort: open PRs first (by newest), then closed (by newest)
+            prsWithStatus.sort(function (a, b) {
+                var aOpen = a.pr.state === 'open' ? 0 : 1;
+                var bOpen = b.pr.state === 'open' ? 0 : 1;
+                if (aOpen !== bOpen) return aOpen - bOpen;
+                return new Date(b.pr.updated_at) - new Date(a.pr.updated_at);
+            });
+
+            for (var i = 0; i < prsWithStatus.length; i++) {
+                var item = prsWithStatus[i];
+                var pr = item.pr;
+                var status = item.status;
+                var row = document.createElement('tr');
+                row.innerHTML =
+                    '<td><a class="pr-link" href="' + escapeHtml(pr.html_url) + '" target="_blank">#' + pr.number + '</a></td>' +
+                    '<td class="title-cell" title="' + escapeHtml(pr.title) + '"><a class="pr-link" href="' + escapeHtml(pr.html_url) + '" target="_blank">' + escapeHtml(pr.title) + '</a></td>' +
+                    '<td class="pr-author"><a class="pr-link" href="' + escapeHtml(pr.user.html_url) + '" target="_blank">' + escapeHtml(pr.user.login) + '</a></td>' +
+                    '<td><span class="status-badge ' + status.cls + '">' + escapeHtml(status.label) + '</span></td>' +
+                    '<td class="pr-date">' + formatDate(pr.created_at) + '</td>' +
+                    '<td class="pr-date">' + formatDate(pr.updated_at) + '</td>';
+                tbody.appendChild(row);
+            }
+
+            document.getElementById('status-loading').style.display = 'none';
+            document.getElementById('status-table-wrap').style.display = '';
+        }
+
+        function loadSubmissionStatus() {
+            statusLoaded = true;
+            document.getElementById('status-loading').style.display = '';
+            document.getElementById('status-error').style.display = 'none';
+            document.getElementById('status-table-wrap').style.display = 'none';
+
+            // Fetch open and closed PRs (up to 30 each, most recent)
+            Promise.all([
+                fetch(API_BASE + '/pulls?state=open&per_page=30&sort=updated&direction=desc').then(function (r) { return r.json(); }),
+                fetch(API_BASE + '/pulls?state=closed&per_page=30&sort=updated&direction=desc').then(function (r) { return r.json(); })
+            ]).then(function (results) {
+                var allPRs = results[0].concat(results[1]);
+
+                // For each PR, fetch its comments to determine status
+                var commentFetches = allPRs.map(function (pr) {
+                    return fetch(API_BASE + '/issues/' + pr.number + '/comments?per_page=100')
+                        .then(function (r) { return r.json(); })
+                        .then(function (comments) {
+                            return { pr: pr, status: determineStatus(pr, comments) };
+                        });
+                });
+
+                return Promise.all(commentFetches);
+            }).then(function (prsWithStatus) {
+                renderTable(prsWithStatus);
+            }).catch(function (err) {
+                console.error('Failed to load PR status:', err);
+                document.getElementById('status-loading').style.display = 'none';
+                var errEl = document.getElementById('status-error');
+                errEl.textContent = 'Failed to load submission status from GitHub. This may be due to API rate limiting. Try again in a few minutes.';
+                errEl.style.display = '';
+            });
+        }
+    })();
+    </script>
 </body>
 </html>

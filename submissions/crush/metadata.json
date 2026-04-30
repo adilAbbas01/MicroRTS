@@ -1,0 +1,9 @@
+{
+  "team_name": "crush",
+  "display_name": "CRush",
+  "agent_class": "CRush",
+  "agent_file": "CRush.java",
+  "model_provider": "none",
+  "model_name": "none",
+  "description": "Adaptive ranged rush bot with tactical formations. Worker rush on small maps, ranged units with kiting and square formation tactics on larger maps. By Cristiano D'Angelo, submitted by Chase Morris."
+}

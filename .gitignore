@@ -19,4 +19,7 @@ sources.list
 
 # Python
 __pycache__/
-*.pyc
+*.pyctournament/traces/*.json
+tournament/traces/*.xml
+tournament/traces/*.json
+tournament/traces/*.xml

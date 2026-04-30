@@ -599,6 +599,9 @@ def run_tournament(games_per_pair=1):
             results["reference_games"]
         )
 
+    # Map display names to Java class names
+    agent_classes_map = {info["display"]: cls for cls, info in LLMS.items()}
+
     results_file = f"{RESULTS_DIR}/benchmark_{timestamp}.json"
     with open(results_file, 'w') as f:
         json.dump({
@@ -614,6 +617,7 @@ def run_tournament(games_per_pair=1):
                 cls: {"name": info["name"], "weight": info["weight"], "tier": info["tier"]}
                 for cls, info in ANCHORS.items()
             },
+            "agent_classes": agent_classes_map,
             "benchmark_scores": benchmark_scores,
             "eliminated_at": eliminated_at,
             "opponent_breakdown": opponent_breakdowns,
@@ -631,13 +635,15 @@ def run_tournament(games_per_pair=1):
     else:
         leaderboard = {"entries": []}
 
-    # Build agent_type lookup by display name
+    # Build agent_type and agent_class lookups by display name
     agent_types = {info["display"]: info["agent_type"] for info in LLMS.values()}
+    agent_classes_map = {info["display"]: cls for cls, info in LLMS.items()}
 
     for llm_name, score in benchmark_scores.items():
         leaderboard["entries"].append({
             "model": llm_name,
             "agent_type": agent_types.get(llm_name, "unknown"),
+            "agent_class": agent_classes_map.get(llm_name, ""),
             "score": score,
             "version": "2.0",
             "date": now.isoformat(),

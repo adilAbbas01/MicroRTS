@@ -1,0 +1,63 @@
+name: Post-Merge Tournament
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'submissions/**'
+
+permissions:
+  contents: write
+
+jobs:
+  tournament:
+    runs-on: self-hosted
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temunia
+          java-version: '17'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Validate submissions
+        run: python3 tournament/validate_submission.py --all
+
+      - name: Build project
+        run: ant build
+
+      - name: Verify Ollama is running
+        run: |
+          curl -sf http://localhost:11434/api/tags > /dev/null || {
+            echo "ERROR: Ollama is not running. Start it with: ollama serve"
+            exit 1
+          }
+          echo "Ollama is running."
+
+      - name: Run tournament
+        env:
+          OLLAMA_HOST: http://localhost:11434
+        run: python3 tournament/run_tournament.py --games 1 --skip-h2h
+
+      - name: Update match.html agents
+        run: python3 tournament/update_match_agents.py
+
+      - name: Update site data
+        run: python3 tournament/update_site_data.py
+
+      - name: Commit results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add tournament_results/ docs/data/tournament_results.json docs/match.html
+          git diff --cached --quiet || git commit -m "Tournament results $(date +%Y-%m-%d)"
+          git push

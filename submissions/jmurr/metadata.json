@@ -1,0 +1,9 @@
+{
+  "team_name": "jmurr",
+  "display_name": "jmurr",
+  "agent_class": "JMurrAgent",
+  "agent_file": "JMurrAgent.java",
+  "model_provider": "none",
+  "model_name": "none",
+  "description": "Evaluates states from the opponents perspective and subtracts that from overall evaluation score"
+}

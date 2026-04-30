@@ -64,6 +64,7 @@ def load_all_results():
 
         # v2.0 has opponent_breakdown directly
         opponent_breakdowns = data.get("opponent_breakdown", {})
+        agent_classes = data.get("agent_classes", {})
 
         # v1.0 may not have opponent_breakdown, build from detailed_results
         if not opponent_breakdowns and "detailed_results" in data:
@@ -109,6 +110,7 @@ def load_all_results():
                 "games_per_matchup": config.get("games_per_matchup", 1),
                 "opponents": opponent_breakdowns.get(model_name, {}),
                 "eliminated_at": elim_at.get(model_name),
+                "agent_class": agent_classes.get(model_name, ""),
                 "source_file": os.path.basename(filepath),
             }
             all_entries.append(entry)
@@ -146,6 +148,7 @@ def generate_leaderboard_json(best_per_model):
             "version": entry["version"],
             "format": entry.get("format", "full"),
             "eliminated_at": entry.get("eliminated_at"),
+            "agent_class": entry.get("agent_class", ""),
             "date": entry["date"],
             "map": entry["map"],
             "games_per_matchup": entry["games_per_matchup"],

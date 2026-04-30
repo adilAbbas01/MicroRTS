@@ -67,17 +67,19 @@ Modify the prompt in `src/ai/abstraction/ollama.java` to make your LLM agent win
 | `resources/config.properties` | Game settings and opponent selection |
 | `RunLoop.sh` | Run multiple games for testing |
 
-### Changing the Model
+### Model Selection Policy
 
-In `ollama.java` line 121:
+Submitters are welcome to **suggest a preferred model ID** in their agent code or in a comment/README. However, competition runs are executed on the organizers' server using locally available Ollama models. If your preferred model is not available on the server, your agent will be run with whatever model is available.
+
+**Current server model:** `llama3.1:8b` (Meta Llama 3.1 8B, ~5 GB — runs well on CPU and Apple Silicon).
+
+To specify your preferred model, set the default in your agent class:
+
 ```java
 static String MODEL = System.getenv().getOrDefault("OLLAMA_MODEL", "llama3.1:8b");
 ```
 
-Or use environment variable:
-```bash
-export OLLAMA_MODEL="qwen3:14b"
-```
+The `OLLAMA_MODEL` environment variable always takes precedence, so the organizers can override your default when running on the server. If your preferred model differs from what's available, note it in your submission README so organizers are aware.
 
 ### Changing the Opponent
 
@@ -206,6 +208,69 @@ See [GPU_SETUP.md](GPU_SETUP.md) for detailed HPC instructions.
 3. **Log everything** - Check the `logs/` folder for detailed game traces
 4. **Iterate on prompts** - Small changes can have big effects
 5. **Consider the response format** - Invalid JSON means no actions
+
+---
+
+## Self-Reported Tournament Results (Optional)
+
+Submitters are encouraged to include self-reported benchmark results with their submission. These let you share performance numbers obtained using your preferred model on your own hardware — which may differ from what is available on the official competition server.
+
+### What to include
+
+Add a `results.json` file alongside your agent code (e.g., `src/ai/abstraction/submissions/your_team/results.json`). Run `benchmark_arena.py` against the six built-in leaderboard opponents (not against other submissions) and fill in the results.
+
+The format mirrors the official `benchmark_results/leaderboard.json` schema with a few extra metadata fields:
+
+```json
+{
+  "self_reported": true,
+  "submitter": "your_team_name",
+  "agent_class": "ai.abstraction.submissions.your_team.YourAgent",
+  "model": "qwen3:14b",
+  "hardware": "NVIDIA RTX 4090, 64 GB RAM",
+  "date": "2026-03-01",
+  "notes": "Optional: anything relevant about your setup.",
+
+  "version": "2.0",
+  "format": "single-elimination",
+  "map": "maps/8x8/basesWorkers8x8.xml",
+  "max_cycles": 5000,
+  "games_per_matchup": 1,
+
+  "score": 96.0,
+  "grade": "A+",
+  "eliminated_at": "CoacAI",
+
+  "opponents": {
+    "RandomBiasedAI": { "wins": 1, "draws": 0, "losses": 0, "avg_game_score": 1.2, "weighted_points": 12.0 },
+    "HeavyRush":      { "wins": 1, "draws": 0, "losses": 0, "avg_game_score": 1.2, "weighted_points": 24.0 },
+    "LightRush":      { "wins": 1, "draws": 0, "losses": 0, "avg_game_score": 1.2, "weighted_points": 18.0 },
+    "WorkerRush":     { "wins": 1, "draws": 0, "losses": 0, "avg_game_score": 1.0, "weighted_points": 15.0 },
+    "Tiamat":         { "wins": 1, "draws": 0, "losses": 0, "avg_game_score": 1.2, "weighted_points": 24.0 },
+    "CoacAI":         { "wins": 0, "draws": 0, "losses": 1, "avg_game_score": 0.0, "weighted_points": 0.0  }
+  }
+}
+```
+
+See `src/ai/abstraction/submissions/example_team/results.json` for a filled-in example.
+
+### How to generate your results
+
+```bash
+# Run the benchmark arena against the six built-in opponents
+export OLLAMA_MODEL="your-preferred-model"
+python3 benchmark_arena.py
+
+# Results are written to benchmark_results/benchmark_<timestamp>.json
+# Copy the relevant entry into your submission's results.json
+```
+
+### Important caveats
+
+- Self-reported results are **not verified** and are separate from official competition scores.
+- Official scores are always run by the organizers on the competition server using the server's available model (`llama3.1:8b` currently).
+- Self-reported results are useful context — they let reviewers see how your agent performs with a more capable model, and help identify whether a weaker official score is a model-capability issue vs. a prompt/strategy issue.
+- Only report results against the six built-in leaderboard opponents. Do not report results against other submissions.
 
 ---
 

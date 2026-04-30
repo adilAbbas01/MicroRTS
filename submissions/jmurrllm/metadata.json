@@ -1,0 +1,9 @@
+{
+  "team_name": "jmurrllm",
+  "display_name": "jmurrllm",
+  "agent_class": "JMurrAgent",
+  "agent_file": "JMurrAgent.java",
+  "model_provider": "ollama",
+  "model_name": "llama3.1:8b",
+  "description": "Start by using light rush. Then after a set number of turns, prompt an LLM to determine the opponent strategy. Then choose a counter strategy from a predetermined table."
+}

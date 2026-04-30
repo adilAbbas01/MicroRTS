@@ -1,0 +1,50 @@
+{
+  "self_reported": true,
+  "submitter": "example_team",
+  "agent_class": "ai.abstraction.submissions.example_team.WorkerRushLLMAgent",
+  "model": "llama3.1:8b",
+  "hardware": "Apple M2 Pro, 32 GB RAM, CPU only",
+  "date": "2026-03-01",
+  "notes": "Ran 1 game per opponent. Tiamat and CoacAI require bot JARs in lib/bots/.",
+
+  "version": "2.0",
+  "format": "single-elimination",
+  "map": "maps/8x8/basesWorkers8x8.xml",
+  "max_cycles": 5000,
+  "games_per_matchup": 1,
+
+  "score": 54.0,
+  "grade": "D",
+  "eliminated_at": "WorkerRush",
+
+  "opponents": {
+    "RandomBiasedAI": {
+      "wins": 1,
+      "draws": 0,
+      "losses": 0,
+      "avg_game_score": 1.2,
+      "weighted_points": 12.0
+    },
+    "HeavyRush": {
+      "wins": 1,
+      "draws": 0,
+      "losses": 0,
+      "avg_game_score": 1.1,
+      "weighted_points": 22.0
+    },
+    "LightRush": {
+      "wins": 1,
+      "draws": 0,
+      "losses": 0,
+      "avg_game_score": 1.2,
+      "weighted_points": 18.0
+    },
+    "WorkerRush": {
+      "wins": 0,
+      "draws": 0,
+      "losses": 1,
+      "avg_game_score": 0.0,
+      "weighted_points": 0.0
+    }
+  }
+}

@@ -4,6 +4,6 @@
   "agent_class": "XieBot",
   "agent_file": "XieBot.java",
   "model_provider": "ollama",
-  "model_name": "OLLAMA_MODEL env var, default llama3.1:8b",
-  "description": "Deterministic MicroRTS rush bot with bounded Ollama macro advice. The script controls economy, barracks timing, Light production, defense, and attacks; Ollama only occasionally selects RUSH, BALANCED, or ECON and is safely ignored on timeout or invalid output."
+  "model_name": "llama3.1:8b",
+  "description": "LLM-directed strategy planner for 16x16/32x32 play with bounded economy, production, posture, and selective tactical MCTS."
 }
