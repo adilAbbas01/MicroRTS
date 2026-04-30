@@ -5,5 +5,5 @@
   "agent_file": "ChaseBotPacked.java",
   "model_provider": "ollama",
   "model_name": "llama3.1:8b",
-  "description": "Hybrid LLM-guided bot: adaptive macro-strategy engine with Ollama strategic consultation for attack or defense bias, economy balance, and unit composition, with llama3.1:8b as the default model."
+  "description": "Deterministic strategy engine over WorkerRush/LightRush/HeavyRush/RangedRush delegates with map-size-adaptive phase thresholds and an opponent-build counter table for 16x16+ play. Ollama advisor is consulted every ~500 ticks (or on phase change) with an 80ms read timeout and a circuit breaker so a stalled model can't blow the per-tick budget."
 }
