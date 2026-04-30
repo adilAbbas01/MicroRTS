@@ -3,7 +3,7 @@
   "display_name": "Chase",
   "agent_class": "ChaseBotPacked",
   "agent_file": "ChaseBotPacked.java",
-  "model_provider": "openai",
-  "model_name": "gpt-5",
-  "description": "Hybrid LLM-guided bot: adaptive macro-strategy engine with GPT-5 strategic consultation for attack/defense bias, military/economy balance, and unit composition. Rule-based execution with LLM-tuned parameters every 200 ticks."
+  "model_provider": "ollama",
+  "model_name": "llama3.1:8b",
+  "description": "Deterministic strategy engine over WorkerRush/LightRush/HeavyRush/RangedRush delegates with map-size-adaptive phase thresholds and an opponent-build counter table for 16x16+ play. Ollama advisor is consulted every ~500 ticks (or on phase change) with an 80ms read timeout and a circuit breaker so a stalled model can't blow the per-tick budget."
 }

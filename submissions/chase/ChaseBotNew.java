@@ -7,9 +7,7 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -49,16 +47,6 @@ public class ChaseBotPacked extends AIWithComputationBudget {
     private String lastPhase = "opening";
     private AdvisorRecommendation lastAppliedRecommendation = AdvisorRecommendation.neutral();
     private MacroDecision lastDecision = null;
-    private MacroStrategy lastDelegateStrategy = MacroStrategy.LIGHT_RUSH;
-
-    private boolean cachedPathOpen = true;
-    private int pathTick = -9999;
-    private int lastEnemyBarracks = -1;
-    private long lastEnemyBaseId = -1L;
-    private long lastMyBaseId = -1L;
-    private boolean advisorWarmed = false;
-
-    private final Deque<MacroStrategy> recentStrategies = new ArrayDeque<>();
 
     public ChaseBotPacked(UnitTypeTable utt) {
         this(utt, ChaseBotConfig.fromEnvironment());
@@ -94,14 +82,6 @@ public class ChaseBotPacked extends AIWithComputationBudget {
         lastPhase = "opening";
         lastAppliedRecommendation = AdvisorRecommendation.neutral();
         lastDecision = null;
-        lastDelegateStrategy = MacroStrategy.LIGHT_RUSH;
-        cachedPathOpen = true;
-        pathTick = -9999;
-        lastEnemyBarracks = -1;
-        lastEnemyBaseId = -1L;
-        lastMyBaseId = -1L;
-        advisorWarmed = false;
-        recentStrategies.clear();
         workerRush.reset();
         lightRush.reset();
         heavyRush.reset();
@@ -130,60 +110,13 @@ public class ChaseBotPacked extends AIWithComputationBudget {
             return new PlayerAction();
         }
 
-        boolean pathOpen = computePathOpen(player, gs);
-        ChaseGameSnapshot snapshot = ChaseGameSnapshot.fromGameState(player, gs, pathOpen);
-
-        if (!advisorWarmed) {
-            advisorWarmed = true;
-            try {
-                lastAppliedRecommendation = AdvisorRecommendation.sanitize(advisor.advise(snapshot));
-                lastConsultationTick = snapshot.getTime();
-                lastPhase = determinePhase(snapshot);
-            } catch (Exception ex) {
-                lastAppliedRecommendation = AdvisorRecommendation.neutral();
-            }
-        } else {
-            maybeRefreshRecommendation(snapshot);
-        }
-
+        ChaseGameSnapshot snapshot = ChaseGameSnapshot.fromGameState(player, gs, pathFinding);
+        maybeRefreshRecommendation(snapshot);
         lastDecision = strategyEngine.decide(snapshot, lastAppliedRecommendation);
 
         AI delegate = selectDelegate(lastDecision, snapshot);
-        MacroStrategy chosen = strategyOfDelegate(delegate);
-        if (chosen != null) {
-            lastDelegateStrategy = chosen;
-            recentStrategies.addLast(chosen);
-            while (recentStrategies.size() > 3) {
-                recentStrategies.removeFirst();
-            }
-        }
-
-        PlayerAction action = safeDelegate(delegate, player, gs);
+        PlayerAction action = delegate.getAction(player, gs);
         return action != null ? action : new PlayerAction();
-    }
-
-    private PlayerAction safeDelegate(AI delegate, int player, GameState gs) {
-        try {
-            return delegate.getAction(player, gs);
-        } catch (Exception primary) {
-            // Built-in rush delegates (Harvest action) can throw NPE when a
-            // worker's harvest target is destroyed mid-tick. Reset the failing
-            // delegate and fall back to LightRush; if that also throws, skip
-            // this tick rather than crashing the game.
-            try {
-                delegate.reset();
-            } catch (Exception ignored) {
-                // ignored
-            }
-            if (delegate != lightRush) {
-                try {
-                    return lightRush.getAction(player, gs);
-                } catch (Exception ignored) {
-                    // ignored
-                }
-            }
-            return new PlayerAction();
-        }
     }
 
     public AdvisorRecommendation getLastAppliedRecommendation() {
@@ -192,57 +125,6 @@ public class ChaseBotPacked extends AIWithComputationBudget {
 
     public MacroDecision getLastDecision() {
         return lastDecision;
-    }
-
-    private boolean computePathOpen(int player, GameState gs) {
-        int now = gs.getTime();
-        PhysicalGameState pgs = gs.getPhysicalGameState();
-        Unit myBase = null;
-        Unit enemyBase = null;
-        int enemyBarracks = 0;
-        for (Unit unit : pgs.getUnits()) {
-            String type = unit.getType().name;
-            if (unit.getPlayer() == player) {
-                if ("Base".equals(type) && myBase == null) {
-                    myBase = unit;
-                }
-            } else if (unit.getPlayer() >= 0) {
-                if ("Base".equals(type) && enemyBase == null) {
-                    enemyBase = unit;
-                }
-                if ("Barracks".equals(type)) {
-                    enemyBarracks++;
-                }
-            }
-        }
-
-        long myBaseId = myBase != null ? myBase.getID() : -1L;
-        long enemyBaseId = enemyBase != null ? enemyBase.getID() : -1L;
-        boolean changed = myBaseId != lastMyBaseId
-                || enemyBaseId != lastEnemyBaseId
-                || enemyBarracks != lastEnemyBarracks;
-        boolean stale = now - pathTick >= 200;
-
-        if (!changed && !stale && pathTick >= 0) {
-            return cachedPathOpen;
-        }
-
-        boolean open = true;
-        if (myBase != null && enemyBase != null) {
-            int distance = pathFinding.findDistToPositionInRange(
-                    myBase,
-                    enemyBase.getPosition(pgs),
-                    1,
-                    gs,
-                    gs.getResourceUsage());
-            open = distance >= 0;
-        }
-        cachedPathOpen = open;
-        pathTick = now;
-        lastEnemyBarracks = enemyBarracks;
-        lastEnemyBaseId = enemyBaseId;
-        lastMyBaseId = myBaseId;
-        return open;
     }
 
     private void maybeRefreshRecommendation(ChaseGameSnapshot snapshot) {
@@ -268,14 +150,10 @@ public class ChaseBotPacked extends AIWithComputationBudget {
         if (snapshot.getNearestEnemyToBase() <= 5) {
             return "defense";
         }
-        int area = Math.max(64, snapshot.getMapWidth() * snapshot.getMapHeight());
-        int earlyEnd = Math.min(800, Math.max(250, 250 * area / 64));
-        int lateStart = Math.min(4000, Math.max(1200, 1200 * area / 64));
-        int time = snapshot.getTime();
-        if (time < earlyEnd && snapshot.getMyBarracks() == 0) {
+        if (snapshot.getTime() < 250 && snapshot.getMyBarracks() == 0) {
             return "opening";
         }
-        if (time > lateStart || snapshot.getMyBarracks() >= 2) {
+        if (snapshot.getTime() > 1200 || snapshot.getMyBarracks() >= 2) {
             return "late";
         }
         return "midgame";
@@ -285,65 +163,19 @@ public class ChaseBotPacked extends AIWithComputationBudget {
         if (decision == null) {
             return lightRush;
         }
-        int dim = snapshot.getMapMaxDimension();
-
-        if (dim <= 8) {
+        if (snapshot.getMapMaxDimension() <= 8) {
             if (snapshot.getTime() < config.getCoacOpeningTicks()) {
                 return workerRush;
             }
+            return lightRush;
+        }
+        if (snapshot.getMapMaxDimension() <= 16) {
             if (shouldUseSmallMapPressureDelegate(snapshot)) {
                 return rangedRush;
             }
-            return lightRush;
+            return workerRush;
         }
-
-        OpponentBuildClass opponent = snapshot.getOpponentBuildClass();
-        boolean underThreat = snapshot.getNearestEnemyToBase() <= 5;
-        boolean blocked = !snapshot.isPathToEnemyOpen();
-
-        if (blocked) {
-            return rangedRush;
-        }
-
-        // 9x9+: LightRush by default — it builds workers, barracks, and a mobile
-        // army in one pipeline, and it's the standard competitive opener on
-        // medium/large maps. Switching delegates mid-game wastes in-flight
-        // production, so we only counter when there is a clear hard matchup.
-        MacroStrategy strategy = MacroStrategy.LIGHT_RUSH;
-
-        if (dim >= 12 && opponent != OpponentBuildClass.UNKNOWN && !underThreat) {
-            switch (opponent) {
-                case HEAVY_RUSH:
-                    strategy = MacroStrategy.RANGED_RUSH;
-                    break;
-                case RANGED_RUSH:
-                case LIGHT_RUSH:
-                case WORKER_RUSH:
-                default:
-                    // Lights handle workers, lights, and ranged adequately;
-                    // mirror-match LightRush rather than over-switch.
-                    break;
-            }
-        }
-
-        // Defensive override: when the engine flags ranged urgency under threat
-        // (heavy enemies pressing our base), respect it.
-        MacroStrategy engineStrategy = decision.getStrategy();
-        if (underThreat && engineStrategy == MacroStrategy.RANGED_RUSH) {
-            strategy = MacroStrategy.RANGED_RUSH;
-        }
-        if (underThreat && engineStrategy == MacroStrategy.HEAVY_RUSH) {
-            strategy = MacroStrategy.HEAVY_RUSH;
-        }
-
-        return delegateForStrategy(strategy);
-    }
-
-    private AI delegateForStrategy(MacroStrategy strategy) {
-        if (strategy == null) {
-            return lightRush;
-        }
-        switch (strategy) {
+        switch (decision.getStrategy()) {
             case WORKER_RUSH:
                 return workerRush;
             case HEAVY_RUSH:
@@ -354,14 +186,6 @@ public class ChaseBotPacked extends AIWithComputationBudget {
             default:
                 return lightRush;
         }
-    }
-
-    private MacroStrategy strategyOfDelegate(AI delegate) {
-        if (delegate == workerRush) return MacroStrategy.WORKER_RUSH;
-        if (delegate == lightRush) return MacroStrategy.LIGHT_RUSH;
-        if (delegate == heavyRush) return MacroStrategy.HEAVY_RUSH;
-        if (delegate == rangedRush) return MacroStrategy.RANGED_RUSH;
-        return null;
     }
 
     private boolean shouldUseSmallMapPressureDelegate(ChaseGameSnapshot snapshot) {
@@ -378,14 +202,6 @@ public class ChaseBotPacked extends AIWithComputationBudget {
             return false;
         }
         return snapshot.getEnemyLights() + snapshot.getEnemyHeavies() + snapshot.getEnemyRanged() > 0;
-    }
-
-    MacroStrategy getLastDelegateStrategy() {
-        return lastDelegateStrategy;
-    }
-
-    Deque<MacroStrategy> getRecentStrategies() {
-        return recentStrategies;
     }
 }
 
@@ -499,9 +315,9 @@ final class ChaseBotConfig {
         builder.setOllamaModel(System.getenv().getOrDefault(
                 "CHASEBOT_OLLAMA_MODEL",
                 System.getenv().getOrDefault("OLLAMA_MODEL", "llama3.1:8b")));
-        builder.setConsultationInterval(parseInt("CHASEBOT_CONSULT_INTERVAL", 500));
-        builder.setConnectTimeoutMs(parseInt("CHASEBOT_CONNECT_TIMEOUT_MS", 40));
-        builder.setReadTimeoutMs(parseInt("CHASEBOT_READ_TIMEOUT_MS", 80));
+        builder.setConsultationInterval(parseInt("CHASEBOT_CONSULT_INTERVAL", 250));
+        builder.setConnectTimeoutMs(parseInt("CHASEBOT_CONNECT_TIMEOUT_MS", 1500));
+        builder.setReadTimeoutMs(parseInt("CHASEBOT_READ_TIMEOUT_MS", 5000));
         builder.setAdvisorCacheEntries(parseInt("CHASEBOT_ADVISOR_CACHE", 128));
         builder.setCoacOpeningTicks(parseInt("CHASEBOT_COAC_OPENING_TICKS", 210));
         return builder.build();
@@ -550,9 +366,9 @@ final class ChaseBotConfig {
     static final class Builder {
         private boolean advisorEnabled = true;
         private String ollamaModel = "llama3.1:8b";
-        private int consultationInterval = 500;
-        private int connectTimeoutMs = 40;
-        private int readTimeoutMs = 80;
+        private int consultationInterval = 250;
+        private int connectTimeoutMs = 1500;
+        private int readTimeoutMs = 5000;
         private int advisorCacheEntries = 128;
         private int coacOpeningTicks = 210;
 
@@ -619,7 +435,6 @@ final class ChaseGameSnapshot {
     private final boolean pathToEnemyOpen;
     private final int nearestEnemyToBase;
     private final int nearbyResources;
-    private final OpponentBuildClass opponentBuildClass;
 
     private ChaseGameSnapshot(Builder builder) {
         this.mapWidth = builder.mapWidth;
@@ -642,14 +457,13 @@ final class ChaseGameSnapshot {
         this.pathToEnemyOpen = builder.pathToEnemyOpen;
         this.nearestEnemyToBase = builder.nearestEnemyToBase;
         this.nearbyResources = builder.nearbyResources;
-        this.opponentBuildClass = builder.opponentBuildClass;
     }
 
     public static Builder builder() {
         return new Builder();
     }
 
-    public static ChaseGameSnapshot fromGameState(int player, GameState gs, boolean pathOpen) {
+    public static ChaseGameSnapshot fromGameState(int player, GameState gs, AStarPathFinding pathFinding) {
         PhysicalGameState pgs = gs.getPhysicalGameState();
         Player me = gs.getPlayer(player);
         Player enemy = gs.getPlayer(1 - player);
@@ -659,21 +473,14 @@ final class ChaseGameSnapshot {
                 .setMapHeight(pgs.getHeight())
                 .setTime(gs.getTime())
                 .setMyResources(me.getResources())
-                .setEnemyResources(enemy != null ? enemy.getResources() : 0)
-                .setPathToEnemyOpen(pathOpen);
+                .setEnemyResources(enemy != null ? enemy.getResources() : 0);
 
         Unit myBase = null;
-        List<Unit> resources = new ArrayList<>();
-        List<Unit> enemyUnits = new ArrayList<>();
+        Unit enemyBase = null;
 
         for (Unit unit : pgs.getUnits()) {
-            if (unit.getType().isResource) {
-                resources.add(unit);
-                continue;
-            }
             String type = unit.getType().name;
-            int unitOwner = unit.getPlayer();
-            if (unitOwner == player) {
+            if (unit.getPlayer() == player) {
                 if ("Worker".equals(type)) {
                     builder.setMyWorkers(builder.myWorkers + 1);
                 } else if ("Light".equals(type)) {
@@ -690,8 +497,7 @@ final class ChaseGameSnapshot {
                 } else if ("Barracks".equals(type)) {
                     builder.setMyBarracks(builder.myBarracks + 1);
                 }
-            } else if (unitOwner >= 0) {
-                enemyUnits.add(unit);
+            } else if (unit.getPlayer() >= 0) {
                 if ("Worker".equals(type)) {
                     builder.setEnemyWorkers(builder.enemyWorkers + 1);
                 } else if ("Light".equals(type)) {
@@ -702,6 +508,9 @@ final class ChaseGameSnapshot {
                     builder.setEnemyRanged(builder.enemyRanged + 1);
                 } else if ("Base".equals(type)) {
                     builder.setEnemyBases(builder.enemyBases + 1);
+                    if (enemyBase == null) {
+                        enemyBase = unit;
+                    }
                 } else if ("Barracks".equals(type)) {
                     builder.setEnemyBarracks(builder.enemyBarracks + 1);
                 }
@@ -711,83 +520,123 @@ final class ChaseGameSnapshot {
         int nearbyResourceCount = 0;
         int closestEnemyToBase = Integer.MAX_VALUE;
         if (myBase != null) {
-            for (Unit r : resources) {
-                if (manhattan(myBase, r) <= 8) {
-                    nearbyResourceCount++;
-                }
-            }
-            for (Unit e : enemyUnits) {
-                int d = manhattan(myBase, e);
-                if (d < closestEnemyToBase) {
-                    closestEnemyToBase = d;
+            for (Unit unit : pgs.getUnits()) {
+                if (unit.getType().isResource) {
+                    int distance = manhattan(myBase, unit);
+                    if (distance <= 8) {
+                        nearbyResourceCount++;
+                    }
+                } else if (unit.getPlayer() >= 0 && unit.getPlayer() != player) {
+                    closestEnemyToBase = Math.min(closestEnemyToBase, manhattan(myBase, unit));
                 }
             }
         }
 
         builder.setNearbyResources(nearbyResourceCount);
         builder.setNearestEnemyToBase(closestEnemyToBase == Integer.MAX_VALUE ? 9999 : closestEnemyToBase);
-        builder.setOpponentBuildClass(classifyOpponent(builder));
+
+        boolean pathOpen = true;
+        if (myBase != null && enemyBase != null) {
+            int distance = pathFinding.findDistToPositionInRange(
+                    myBase,
+                    enemyBase.getPosition(pgs),
+                    1,
+                    gs,
+                    gs.getResourceUsage());
+            pathOpen = distance >= 0;
+        }
+        builder.setPathToEnemyOpen(pathOpen);
 
         return builder.build();
-    }
-
-    private static OpponentBuildClass classifyOpponent(Builder b) {
-        if (b.time < 200) {
-            return OpponentBuildClass.UNKNOWN;
-        }
-        int lights = b.enemyLights;
-        int heavies = b.enemyHeavies;
-        int ranged = b.enemyRanged;
-        int barracks = b.enemyBarracks;
-        int armyTotal = lights + heavies + ranged;
-
-        if (armyTotal == 0 && barracks == 0) {
-            if (b.enemyWorkers >= 4) {
-                return OpponentBuildClass.WORKER_RUSH;
-            }
-            return OpponentBuildClass.UNKNOWN;
-        }
-        if (barracks == 0 && b.enemyWorkers >= 5) {
-            return OpponentBuildClass.WORKER_RUSH;
-        }
-        if (lights >= heavies + ranged && lights > 0) {
-            return OpponentBuildClass.LIGHT_RUSH;
-        }
-        if (heavies > lights + ranged && heavies > 0) {
-            return OpponentBuildClass.HEAVY_RUSH;
-        }
-        if (ranged >= lights + heavies && ranged > 0) {
-            return OpponentBuildClass.RANGED_RUSH;
-        }
-        return OpponentBuildClass.UNKNOWN;
     }
 
     private static int manhattan(Unit a, Unit b) {
         return Math.abs(a.getX() - b.getX()) + Math.abs(a.getY() - b.getY());
     }
 
-    public int getMapWidth() { return mapWidth; }
-    public int getMapHeight() { return mapHeight; }
-    public int getMapMaxDimension() { return Math.max(mapWidth, mapHeight); }
-    public int getTime() { return time; }
-    public int getMyResources() { return myResources; }
-    public int getEnemyResources() { return enemyResources; }
-    public int getMyWorkers() { return myWorkers; }
-    public int getMyLights() { return myLights; }
-    public int getMyHeavies() { return myHeavies; }
-    public int getMyRanged() { return myRanged; }
-    public int getMyBases() { return myBases; }
-    public int getMyBarracks() { return myBarracks; }
-    public int getEnemyWorkers() { return enemyWorkers; }
-    public int getEnemyLights() { return enemyLights; }
-    public int getEnemyHeavies() { return enemyHeavies; }
-    public int getEnemyRanged() { return enemyRanged; }
-    public int getEnemyBases() { return enemyBases; }
-    public int getEnemyBarracks() { return enemyBarracks; }
-    public boolean isPathToEnemyOpen() { return pathToEnemyOpen; }
-    public int getNearestEnemyToBase() { return nearestEnemyToBase; }
-    public int getNearbyResources() { return nearbyResources; }
-    public OpponentBuildClass getOpponentBuildClass() { return opponentBuildClass; }
+    public int getMapWidth() {
+        return mapWidth;
+    }
+
+    public int getMapHeight() {
+        return mapHeight;
+    }
+
+    public int getMapMaxDimension() {
+        return Math.max(mapWidth, mapHeight);
+    }
+
+    public int getTime() {
+        return time;
+    }
+
+    public int getMyResources() {
+        return myResources;
+    }
+
+    public int getEnemyResources() {
+        return enemyResources;
+    }
+
+    public int getMyWorkers() {
+        return myWorkers;
+    }
+
+    public int getMyLights() {
+        return myLights;
+    }
+
+    public int getMyHeavies() {
+        return myHeavies;
+    }
+
+    public int getMyRanged() {
+        return myRanged;
+    }
+
+    public int getMyBases() {
+        return myBases;
+    }
+
+    public int getMyBarracks() {
+        return myBarracks;
+    }
+
+    public int getEnemyWorkers() {
+        return enemyWorkers;
+    }
+
+    public int getEnemyLights() {
+        return enemyLights;
+    }
+
+    public int getEnemyHeavies() {
+        return enemyHeavies;
+    }
+
+    public int getEnemyRanged() {
+        return enemyRanged;
+    }
+
+    public int getEnemyBases() {
+        return enemyBases;
+    }
+
+    public int getEnemyBarracks() {
+        return enemyBarracks;
+    }
+
+    public boolean isPathToEnemyOpen() {
+        return pathToEnemyOpen;
+    }
+
+    public int getNearestEnemyToBase() {
+        return nearestEnemyToBase;
+    }
+
+    public int getNearbyResources() {
+        return nearbyResources;
+    }
 
     public int getMyMilitaryStrength() {
         return myWorkers + (2 * myLights) + (3 * myHeavies) + (2 * myRanged);
@@ -818,29 +667,106 @@ final class ChaseGameSnapshot {
         private boolean pathToEnemyOpen = true;
         private int nearestEnemyToBase = 9999;
         private int nearbyResources = 0;
-        private OpponentBuildClass opponentBuildClass = OpponentBuildClass.UNKNOWN;
 
-        Builder setMapWidth(int v) { this.mapWidth = v; return this; }
-        Builder setMapHeight(int v) { this.mapHeight = v; return this; }
-        Builder setTime(int v) { this.time = v; return this; }
-        Builder setMyResources(int v) { this.myResources = v; return this; }
-        Builder setEnemyResources(int v) { this.enemyResources = v; return this; }
-        Builder setMyWorkers(int v) { this.myWorkers = v; return this; }
-        Builder setMyLights(int v) { this.myLights = v; return this; }
-        Builder setMyHeavies(int v) { this.myHeavies = v; return this; }
-        Builder setMyRanged(int v) { this.myRanged = v; return this; }
-        Builder setMyBases(int v) { this.myBases = v; return this; }
-        Builder setMyBarracks(int v) { this.myBarracks = v; return this; }
-        Builder setEnemyWorkers(int v) { this.enemyWorkers = v; return this; }
-        Builder setEnemyLights(int v) { this.enemyLights = v; return this; }
-        Builder setEnemyHeavies(int v) { this.enemyHeavies = v; return this; }
-        Builder setEnemyRanged(int v) { this.enemyRanged = v; return this; }
-        Builder setEnemyBases(int v) { this.enemyBases = v; return this; }
-        Builder setEnemyBarracks(int v) { this.enemyBarracks = v; return this; }
-        Builder setPathToEnemyOpen(boolean v) { this.pathToEnemyOpen = v; return this; }
-        Builder setNearestEnemyToBase(int v) { this.nearestEnemyToBase = v; return this; }
-        Builder setNearbyResources(int v) { this.nearbyResources = v; return this; }
-        Builder setOpponentBuildClass(OpponentBuildClass v) { this.opponentBuildClass = v; return this; }
+        Builder setMapWidth(int mapWidth) {
+            this.mapWidth = mapWidth;
+            return this;
+        }
+
+        Builder setMapHeight(int mapHeight) {
+            this.mapHeight = mapHeight;
+            return this;
+        }
+
+        Builder setTime(int time) {
+            this.time = time;
+            return this;
+        }
+
+        Builder setMyResources(int myResources) {
+            this.myResources = myResources;
+            return this;
+        }
+
+        Builder setEnemyResources(int enemyResources) {
+            this.enemyResources = enemyResources;
+            return this;
+        }
+
+        Builder setMyWorkers(int myWorkers) {
+            this.myWorkers = myWorkers;
+            return this;
+        }
+
+        Builder setMyLights(int myLights) {
+            this.myLights = myLights;
+            return this;
+        }
+
+        Builder setMyHeavies(int myHeavies) {
+            this.myHeavies = myHeavies;
+            return this;
+        }
+
+        Builder setMyRanged(int myRanged) {
+            this.myRanged = myRanged;
+            return this;
+        }
+
+        Builder setMyBases(int myBases) {
+            this.myBases = myBases;
+            return this;
+        }
+
+        Builder setMyBarracks(int myBarracks) {
+            this.myBarracks = myBarracks;
+            return this;
+        }
+
+        Builder setEnemyWorkers(int enemyWorkers) {
+            this.enemyWorkers = enemyWorkers;
+            return this;
+        }
+
+        Builder setEnemyLights(int enemyLights) {
+            this.enemyLights = enemyLights;
+            return this;
+        }
+
+        Builder setEnemyHeavies(int enemyHeavies) {
+            this.enemyHeavies = enemyHeavies;
+            return this;
+        }
+
+        Builder setEnemyRanged(int enemyRanged) {
+            this.enemyRanged = enemyRanged;
+            return this;
+        }
+
+        Builder setEnemyBases(int enemyBases) {
+            this.enemyBases = enemyBases;
+            return this;
+        }
+
+        Builder setEnemyBarracks(int enemyBarracks) {
+            this.enemyBarracks = enemyBarracks;
+            return this;
+        }
+
+        Builder setPathToEnemyOpen(boolean pathToEnemyOpen) {
+            this.pathToEnemyOpen = pathToEnemyOpen;
+            return this;
+        }
+
+        Builder setNearestEnemyToBase(int nearestEnemyToBase) {
+            this.nearestEnemyToBase = nearestEnemyToBase;
+            return this;
+        }
+
+        Builder setNearbyResources(int nearbyResources) {
+            this.nearbyResources = nearbyResources;
+            return this;
+        }
 
         ChaseGameSnapshot build() {
             return new ChaseGameSnapshot(this);
@@ -1017,13 +943,33 @@ final class MacroDecision {
         this.economyScore = economyScore;
     }
 
-    public MacroStrategy getStrategy() { return strategy; }
-    public BotPosture getPosture() { return posture; }
-    public UnitPreference getUnitPreference() { return unitPreference; }
-    public int getHarvestTarget() { return harvestTarget; }
-    public int getBarracksTarget() { return barracksTarget; }
-    public double getAttackScore() { return attackScore; }
-    public double getEconomyScore() { return economyScore; }
+    public MacroStrategy getStrategy() {
+        return strategy;
+    }
+
+    public BotPosture getPosture() {
+        return posture;
+    }
+
+    public UnitPreference getUnitPreference() {
+        return unitPreference;
+    }
+
+    public int getHarvestTarget() {
+        return harvestTarget;
+    }
+
+    public int getBarracksTarget() {
+        return barracksTarget;
+    }
+
+    public double getAttackScore() {
+        return attackScore;
+    }
+
+    public double getEconomyScore() {
+        return economyScore;
+    }
 }
 
 enum MacroStrategy {
@@ -1045,12 +991,9 @@ class OllamaAdvisor implements StrategyAdvisor {
 
     private static final String OLLAMA_HOST =
             System.getenv().getOrDefault("OLLAMA_HOST", "http://localhost:11434");
-    private static final int FAILURE_LIMIT = 2;
 
     private final ChaseBotConfig config;
     private final Map<String, AdvisorRecommendation> cache;
-    private int consecutiveFailures = 0;
-    private boolean circuitOpen = false;
 
     OllamaAdvisor(ChaseBotConfig config) {
         this.config = config;
@@ -1064,7 +1007,7 @@ class OllamaAdvisor implements StrategyAdvisor {
 
     @Override
     public AdvisorRecommendation advise(ChaseGameSnapshot snapshot) throws Exception {
-        if (!config.isAdvisorEnabled() || circuitOpen) {
+        if (!config.isAdvisorEnabled()) {
             return AdvisorRecommendation.neutral();
         }
 
@@ -1075,21 +1018,12 @@ class OllamaAdvisor implements StrategyAdvisor {
             }
         }
 
-        try {
-            String response = performRequest(snapshot);
-            AdvisorRecommendation recommendation = parseRecommendation(response);
-            consecutiveFailures = 0;
-            synchronized (cache) {
-                cache.put(cacheKey, recommendation);
-            }
-            return recommendation;
-        } catch (IOException ex) {
-            consecutiveFailures++;
-            if (consecutiveFailures >= FAILURE_LIMIT) {
-                circuitOpen = true;
-            }
-            return AdvisorRecommendation.neutral();
+        String response = performRequest(snapshot);
+        AdvisorRecommendation recommendation = parseRecommendation(response);
+        synchronized (cache) {
+            cache.put(cacheKey, recommendation);
         }
+        return recommendation;
     }
 
     @Override
@@ -1099,48 +1033,44 @@ class OllamaAdvisor implements StrategyAdvisor {
 
     String performRequest(ChaseGameSnapshot snapshot) throws IOException {
         HttpURLConnection connection = (HttpURLConnection) new URL(OLLAMA_HOST + "/api/generate").openConnection();
-        try {
-            connection.setRequestMethod("POST");
-            connection.setDoOutput(true);
-            connection.setConnectTimeout(config.getConnectTimeoutMs());
-            connection.setReadTimeout(config.getReadTimeoutMs());
-            connection.setRequestProperty("Content-Type", "application/json");
+        connection.setRequestMethod("POST");
+        connection.setDoOutput(true);
+        connection.setConnectTimeout(config.getConnectTimeoutMs());
+        connection.setReadTimeout(config.getReadTimeoutMs());
+        connection.setRequestProperty("Content-Type", "application/json");
 
-            JsonObject payload = new JsonObject();
-            payload.addProperty("model", config.getOllamaModel());
-            payload.addProperty("prompt", buildPrompt(snapshot));
-            payload.addProperty("stream", false);
-            payload.addProperty("format", "json");
+        JsonObject payload = new JsonObject();
+        payload.addProperty("model", config.getOllamaModel());
+        payload.addProperty("prompt", buildPrompt(snapshot));
+        payload.addProperty("stream", false);
+        payload.addProperty("format", "json");
 
-            JsonObject options = new JsonObject();
-            options.addProperty("temperature", 0.1);
-            options.addProperty("num_predict", 96);
-            payload.add("options", options);
+        JsonObject options = new JsonObject();
+        options.addProperty("temperature", 0.2);
+        payload.add("options", options);
 
-            byte[] requestBody = payload.toString().getBytes(StandardCharsets.UTF_8);
-            try (OutputStream output = connection.getOutputStream()) {
-                output.write(requestBody);
-            }
-
-            int status = connection.getResponseCode();
-            BufferedReader reader = new BufferedReader(new InputStreamReader(
-                    status >= 200 && status < 300 ? connection.getInputStream() : connection.getErrorStream(),
-                    StandardCharsets.UTF_8));
-
-            StringBuilder sb = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null) {
-                sb.append(line);
-            }
-            reader.close();
-
-            if (status < 200 || status >= 300) {
-                throw new IOException("Ollama advisor request failed with status " + status + ": " + sb);
-            }
-            return sb.toString();
-        } finally {
-            connection.disconnect();
+        byte[] requestBody = payload.toString().getBytes(StandardCharsets.UTF_8);
+        try (OutputStream output = connection.getOutputStream()) {
+            output.write(requestBody);
         }
+
+        int status = connection.getResponseCode();
+        BufferedReader reader = new BufferedReader(new InputStreamReader(
+                status >= 200 && status < 300 ? connection.getInputStream() : connection.getErrorStream(),
+                StandardCharsets.UTF_8));
+
+        StringBuilder sb = new StringBuilder();
+        String line;
+        while ((line = reader.readLine()) != null) {
+            sb.append(line);
+        }
+        reader.close();
+        connection.disconnect();
+
+        if (status < 200 || status >= 300) {
+            throw new IOException("Ollama advisor request failed with status " + status + ": " + sb);
+        }
+        return sb.toString();
     }
 
     AdvisorRecommendation parseRecommendation(String responseBody) {
@@ -1192,56 +1122,47 @@ class OllamaAdvisor implements StrategyAdvisor {
     }
 
     private String buildPrompt(ChaseGameSnapshot snapshot) {
-        return "You are advising a deterministic microRTS bot. "
-                + "Return EXACTLY one JSON object, no prose. "
-                + "Schema:{\"preferred_strategy\":\"WORKER_RUSH|LIGHT_RUSH|HEAVY_RUSH|RANGED_RUSH|BALANCED\","
-                + "\"unit_preference\":\"BALANCED|LIGHT|HEAVY|RANGED\","
-                + "\"attack_bias\":number in [-3,3],"
-                + "\"economy_bias\":number in [-3,3]}\n"
-                + "Counter table (use this if uncertain): "
-                + "opponent WORKER_RUSH -> LIGHT_RUSH; "
-                + "opponent LIGHT_RUSH -> HEAVY_RUSH; "
-                + "opponent HEAVY_RUSH -> RANGED_RUSH; "
-                + "opponent RANGED_RUSH -> LIGHT_RUSH.\n"
+        return "You are advising a deterministic microRTS bot running with Ollama. "
+                + "Return exactly one JSON object and nothing else. "
+                + "Use conservative, practical nudges only.\n"
+                + "Schema:{"
+                + "\"attack_bias\":number,"
+                + "\"economy_bias\":number,"
+                + "\"preferred_strategy\":\"WORKER_RUSH|LIGHT_RUSH|HEAVY_RUSH|RANGED_RUSH|BALANCED\","
+                + "\"unit_preference\":\"BALANCED|LIGHT|HEAVY|RANGED\""
+                + "}\n"
                 + "Map=" + snapshot.getMapWidth() + "x" + snapshot.getMapHeight()
                 + ", time=" + snapshot.getTime()
-                + ", opponent_build=" + snapshot.getOpponentBuildClass().name()
-                + ", path_open=" + snapshot.isPathToEnemyOpen()
-                + ", my=[w:" + snapshot.getMyWorkers()
-                + ",l:" + snapshot.getMyLights()
-                + ",h:" + snapshot.getMyHeavies()
-                + ",r:" + snapshot.getMyRanged()
-                + ",bks:" + snapshot.getMyBarracks() + "]"
-                + ", enemy=[w:" + snapshot.getEnemyWorkers()
-                + ",l:" + snapshot.getEnemyLights()
-                + ",h:" + snapshot.getEnemyHeavies()
-                + ",r:" + snapshot.getEnemyRanged()
-                + ",bks:" + snapshot.getEnemyBarracks() + "]"
-                + ", nearest_enemy=" + snapshot.getNearestEnemyToBase()
-                + ". Pick the counter to opponent_build. If unsure return BALANCED with 0 biases.";
+                + ", myResources=" + snapshot.getMyResources()
+                + ", enemyResources=" + snapshot.getEnemyResources()
+                + ", myUnits=[workers:" + snapshot.getMyWorkers()
+                + ", light:" + snapshot.getMyLights()
+                + ", heavy:" + snapshot.getMyHeavies()
+                + ", ranged:" + snapshot.getMyRanged()
+                + ", bases:" + snapshot.getMyBases()
+                + ", barracks:" + snapshot.getMyBarracks() + "]"
+                + ", enemyUnits=[workers:" + snapshot.getEnemyWorkers()
+                + ", light:" + snapshot.getEnemyLights()
+                + ", heavy:" + snapshot.getEnemyHeavies()
+                + ", ranged:" + snapshot.getEnemyRanged()
+                + ", bases:" + snapshot.getEnemyBases()
+                + ", barracks:" + snapshot.getEnemyBarracks() + "]"
+                + ", nearestEnemyToBase=" + snapshot.getNearestEnemyToBase()
+                + ", pathOpen=" + snapshot.isPathToEnemyOpen()
+                + ", nearbyResources=" + snapshot.getNearbyResources()
+                + ". Clamp attack_bias and economy_bias to [-3,3]. "
+                + "If unsure, return BALANCED preferences and 0 biases.";
     }
 
     private String buildCacheKey(ChaseGameSnapshot snapshot) {
-        int dim = snapshot.getMapMaxDimension();
-        String mapBucket = dim <= 8 ? "8" : dim <= 12 ? "12" : dim <= 16 ? "16" : "24";
-        int delta = snapshot.getMyMilitaryStrength() - snapshot.getEnemyMilitaryStrength();
-        String strengthBucket = delta <= -3 ? "behind" : delta <= 1 ? "even" : delta <= 5 ? "ahead" : "dominant";
-        String threatBucket = snapshot.getNearestEnemyToBase() <= 5 ? "near" : "safe";
-        String phase;
-        int time = snapshot.getTime();
-        if (time < 250) {
-            phase = "opening";
-        } else if (time < 1500) {
-            phase = "midgame";
-        } else {
-            phase = "late";
-        }
-        return mapBucket
-                + ":" + phase
-                + ":" + snapshot.getOpponentBuildClass().name()
-                + ":" + strengthBucket
-                + ":" + threatBucket
-                + ":" + (snapshot.isPathToEnemyOpen() ? "open" : "blocked");
+        return snapshot.getMapWidth()
+                + "x" + snapshot.getMapHeight()
+                + ":" + snapshot.getTime() / Math.max(1, config.getConsultationInterval())
+                + ":" + snapshot.getMyResources()
+                + ":" + snapshot.getMyMilitaryStrength()
+                + ":" + snapshot.getEnemyMilitaryStrength()
+                + ":" + snapshot.getNearestEnemyToBase()
+                + ":" + snapshot.isPathToEnemyOpen();
     }
 
     private MacroStrategy parseStrategy(String raw) {
@@ -1265,18 +1186,6 @@ class OllamaAdvisor implements StrategyAdvisor {
             return null;
         }
     }
-
-    boolean isCircuitOpen() {
-        return circuitOpen;
-    }
-}
-
-enum OpponentBuildClass {
-    UNKNOWN,
-    WORKER_RUSH,
-    LIGHT_RUSH,
-    HEAVY_RUSH,
-    RANGED_RUSH
 }
 
 interface StrategyAdvisor {
