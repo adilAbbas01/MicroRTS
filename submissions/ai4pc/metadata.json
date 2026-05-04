@@ -1,0 +1,9 @@
+{
+  "team_name": "ai4pc",
+  "display_name": "AI4PC",
+  "agent_class": "AI4PC",
+  "agent_file": "AI4PC.java",
+  "model_provider": "ollama",
+  "model_name": "llama3.1:8b",
+  "description": "Hybrid LLM agent. Every 100 ticks the LLM picks one of WORKER_RUSH / LIGHT_RUSH / HEAVY_RUSH / RANGED_RUSH based on visible enemy composition, with a counter-triangle decision procedure (Ranged beats Heavy, Heavy beats Light, Light beats Ranged) and a stickiness rule that keeps the current strategy unless the enemy reveals a new unit type. Each tick the chosen rush bot (WorkerRushPlusPlus / LightRush / HeavyRush / RangedRush) executes."
+}
