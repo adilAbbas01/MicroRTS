@@ -1,4 +1,4 @@
-package ai.abstraction;
+package ai.abstraction.submissions.adil_bot;
 
 import ai.abstraction.pathfinding.AStarPathFinding;
 import ai.abstraction.pathfinding.PathFinding;

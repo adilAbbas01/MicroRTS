@@ -1,0 +1,9 @@
+{
+  "team_name": "adil-bot",
+  "display_name": "Adil Bot",
+  "agent_class": "MyBot",
+  "agent_file": "MyBot.java",
+  "model_provider": "none",
+  "model_name": "none",
+  "description": "Rule-based bot: harvest, build (base + barracks), train workers/light, attack closest enemy, worker rush before tick 200."
+}
